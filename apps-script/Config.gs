@@ -1,6 +1,6 @@
 const APP = Object.freeze({
-  VERSION: "2.1.0",
-  SCHEMA_VERSION: "2",
+  VERSION: "2.2.0",
+  SCHEMA_VERSION: "3",
   TIMEZONE: "Asia/Seoul",
   TEACHER_TTL_SECONDS: 300,
   ADMIN_TTL_SECONDS: 300,
@@ -44,7 +44,7 @@ const HEADERS = Object.freeze({
   [SHEETS.ENROLLMENTS]: ["id", "grade", "class_id", "student_id", "subject_name", "room_name", "updated_at"],
   [SHEETS.ABSENCES]: ["key", "id", "exam_date", "period", "class_id", "student_id", "reason", "reason_detail", "updated_at"],
   [SHEETS.COMPLETIONS]: ["key", "id", "exam_date", "period", "class_id", "completed_at", "updated_at", "revision"],
-  [SHEETS.SEATING]: ["id", "mode", "exam_date", "period", "grade", "class_id", "subject_name", "room_name", "rows", "cols", "start_side", "disabled_seats_json", "examinee_ids_json", "assignment_json", "updated_at"],
+  [SHEETS.SEATING]: ["id", "mode", "exam_date", "period", "grade", "class_id", "subject_name", "room_name", "rows", "cols", "start_side", "seat_order", "disabled_seats_json", "examinee_ids_json", "assignment_json", "updated_at"],
   [SHEETS.AUDIT]: ["id", "occurred_at", "role", "action", "target_type", "target_id", "count", "success", "detail"],
 });
 

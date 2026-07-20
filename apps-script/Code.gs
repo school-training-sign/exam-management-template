@@ -1149,6 +1149,9 @@ function validateSeatChart_(chart) {
   const period = Number(chart.period);
   const grade = Number(chart.grade);
   const mode = chart.mode === "own" ? "own" : "separate";
+  const seatOrder = chart.seat_order == null || chart.seat_order === ""
+    ? "row"
+    : String(chart.seat_order);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(examDate)) throw apiError_("INVALID_DATE", "자리배치 고사일이 올바르지 않습니다.");
   if (!getRecords_(SHEETS.EXAM_DATES).some((item) => item.exam_date === examDate && isActive_(item))) {
     throw apiError_("EXAM_DATE_NOT_FOUND", "자리배치 고사일을 찾지 못했습니다.");
@@ -1160,6 +1163,9 @@ function validateSeatChart_(chart) {
   const cols = Number(chart.cols) || 5;
   if (!Number.isInteger(rows) || !Number.isInteger(cols) || rows < 1 || cols < 1 || rows > 20 || cols > 20) {
     throw apiError_("INVALID_SEAT_SIZE", "자리배치 행과 열을 확인하세요.");
+  }
+  if (!new Set(["row", "column"]).has(seatOrder)) {
+    throw apiError_("INVALID_SEAT_ORDER", "자리배치 순서를 확인하세요.");
   }
   const classes = getRecords_(SHEETS.CLASSES).filter(isActive_);
   const classInfo = chart.class_id ? classes.find((item) => String(item.id) === String(chart.class_id)) : null;
@@ -1239,14 +1245,25 @@ function validateSeatChart_(chart) {
   });
   const assignment = Array.isArray(chart.assignment) ? chart.assignment : [];
   const assignedSeats = new Set();
+  const assignedSequences = new Set();
+  const capacity = rows * cols - disabled.size;
   assignment.forEach((item) => {
     const key = String(item && typeof item === "object" ? item.key || "" : "");
     if (!validSeatKey_(key, rows, cols)) throw apiError_("INVALID_ASSIGNMENT_SEAT", "범위를 벗어난 배치 좌석이 있습니다.");
     if (disabled.has(key)) throw apiError_("ASSIGNMENT_ON_DISABLED_SEAT", "제외 좌석에 학생을 배치할 수 없습니다.");
     if (assignedSeats.has(key)) throw apiError_("DUPLICATE_ASSIGNMENT_SEAT", "같은 좌석이 배치표에 두 번 들어 있습니다.");
     assignedSeats.add(key);
+    if (item && item.sequence != null && item.sequence !== "") {
+      const sequence = Number(item.sequence);
+      if (!Number.isInteger(sequence) || sequence < 1 || sequence > capacity) {
+        throw apiError_("INVALID_ASSIGNMENT_SEQUENCE", "배치 순번이 좌석 범위를 벗어났습니다.");
+      }
+      if (assignedSequences.has(sequence)) {
+        throw apiError_("DUPLICATE_ASSIGNMENT_SEQUENCE", "같은 배치 순번이 두 번 들어 있습니다.");
+      }
+      assignedSequences.add(sequence);
+    }
   });
-  const capacity = rows * cols - disabled.size;
   if (assignment.length > capacity || assignmentIds.length > capacity) {
     throw apiError_("SEAT_CAPACITY_EXCEEDED", "사용 가능한 좌석보다 배치 학생이 많습니다.");
   }

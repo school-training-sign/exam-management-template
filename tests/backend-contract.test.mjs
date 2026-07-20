@@ -63,9 +63,10 @@ test("배포용 원본 통합문서가 포함되어 있다", () => {
   assert.ok(fs.statSync(workbook).size > 10_000);
 });
 
-test("기존 시트에 revision 열과 schema_version을 안전하게 추가한다", () => {
+test("기존 시트에 revision·seat_order 열과 schema_version을 안전하게 추가한다", () => {
   assert.match(source["Config.gs"], /\[SHEETS\.COMPLETIONS\]:\s*\[[^\]]*"revision"/s);
-  assert.match(source["Config.gs"], /SCHEMA_VERSION:\s*"2"/);
+  assert.match(source["Config.gs"], /\[SHEETS\.SEATING\]:\s*\[[^\]]*"seat_order"/s);
+  assert.match(source["Config.gs"], /SCHEMA_VERSION:\s*"3"/);
   assert.match(source["Repository.gs"], /requiredHeaders\.filter\(\(header\) => existing\.indexOf\(header\) === -1\)/);
   assert.match(source["Repository.gs"], /setSetting_\("schema_version", APP\.SCHEMA_VERSION\)/);
 });
@@ -169,15 +170,20 @@ test("접속 상태 heartbeat는 인증 세션을 짧은 캐시에만 집계한�
   assert.equal(Object.keys(helpers.prunePresenceRegistry_(crowded, now)).length, 250);
 });
 
-test("자리배치는 6행 5열 기본값과 자연키 upsert, 참조 검증을 사용한다", () => {
+test("자리배치는 두 순번 방식, 6행 5열 기본값, 자연키 upsert와 참조 검증을 사용한다", () => {
   assert.match(source["Repository.gs"], /rows:\s*Number\(chart\.rows\) \|\| 6/);
   assert.match(source["Repository.gs"], /cols:\s*Number\(chart\.cols\) \|\| 5/);
+  assert.match(source["Repository.gs"], /seat_order:\s*chart\.seat_order === "column" \? "column" : "row"/);
+  assert.match(source["Repository.gs"], /seat_order:\s*row\.seat_order === "column" \? "column" : "row"/);
   assert.match(source["Code.gs"], /seatNaturalKey_/);
+  assert.match(source["Code.gs"], /INVALID_SEAT_ORDER/);
   assert.match(source["Code.gs"], /SEAT_STUDENT_NOT_FOUND/);
   assert.match(source["Code.gs"], /SEAT_CAPACITY_EXCEEDED/);
   assert.match(source["Code.gs"], /INVALID_ASSIGNMENT_SEAT/);
   assert.match(source["Code.gs"], /ASSIGNMENT_ON_DISABLED_SEAT/);
   assert.match(source["Code.gs"], /DUPLICATE_ASSIGNMENT_SEAT/);
+  assert.match(source["Code.gs"], /INVALID_ASSIGNMENT_SEQUENCE/);
+  assert.match(source["Code.gs"], /DUPLICATE_ASSIGNMENT_SEQUENCE/);
 });
 
 test("집계와 학급 ID 정규화 헬퍼가 기대한 결과를 만든다", () => {
@@ -203,6 +209,10 @@ test("집계와 학급 ID 정규화 헬퍼가 기대한 결과를 만든다", ()
   );
   assert.equal(
     helpers.seatNaturalKey_({ mode: "own", exam_date: "2030-01-01", period: 1, grade: 3, class_id: "c1" }),
+    "own|2030-01-01|1|3|c1||",
+  );
+  assert.equal(
+    helpers.seatNaturalKey_({ mode: "own", exam_date: "2030-01-01", period: 1, grade: 3, class_id: "c1", seat_order: "column" }),
     "own|2030-01-01|1|3|c1||",
   );
 });
