@@ -28,7 +28,7 @@ test("학교코드와 관리자 암호 원문이 배포 파일에 없다", () =>
 test("요청 응답 형식과 권한 액션이 명시되어 있다", () => {
   assert.match(source["Code.gs"], /ok:\s*true,\s*data:/);
   assert.match(source["Code.gs"], /ok:\s*false,\s*data:\s*null,\s*error:/);
-  for (const action of ["school_login", "admin_login", "submit_absence_input", "get_hq_status", "save_seat_charts_batch", "cleanup"]) {
+  for (const action of ["school_login", "admin_login", "presence_ping", "submit_absence_input", "get_hq_status", "save_seat_charts_batch", "cleanup"]) {
     assert.match(all, new RegExp(action));
   }
   assert.doesNotMatch(source["Config.gs"], /"set_absence"|"complete_input"/);
@@ -133,6 +133,40 @@ test("설정 데이터 캐시, 관리자 세션 버전, 로그인 제한이 적�
   assert.match(source["Code.gs"], /LOGIN_RATE_GLOBAL_MAX_ATTEMPTS/);
   assert.match(source["Code.gs"], /LOGIN_RATE_LIMIT/);
   assert.match(source["Code.gs"], /function recordLoginFailure_[\s\S]*LockService\.getScriptLock\(\)/);
+});
+
+test("접속 상태 heartbeat는 인증 세션을 짧은 캐시에만 집계한다", () => {
+  assert.match(source["Config.gs"], /PRESENCE_WINDOW_SECONDS:\s*90/);
+  assert.match(source["Config.gs"], /PRESENCE_MAX_ENTRIES:\s*250/);
+  assert.match(source["Code.gs"], /action === "presence_ping"[\s\S]*requireSession_\(request\.school_session,\s*"teacher"/);
+  assert.match(source["Code.gs"], /request\.user_active === true/);
+  assert.match(source["Code.gs"], /request\.action !== "presence_ping"/);
+  assert.match(source["Code.gs"], /leavePresence_\(request\.school_session\)/);
+  assert.match(source["Code.gs"], /function requireSession_\(token,\s*role,\s*touch\)/);
+
+  const mutationBlock = source["Config.gs"].match(/const MUTATION_ACTIONS[\s\S]*?\]\);/)?.[0] || "";
+  const adminBlock = source["Config.gs"].match(/const ADMIN_ACTIONS[\s\S]*?\]\);/)?.[0] || "";
+  assert.doesNotMatch(mutationBlock, /presence_ping/);
+  assert.doesNotMatch(adminBlock, /presence_ping/);
+
+  const helpers = new Function(
+    "Utilities",
+    `${all}\nreturn { prunePresenceRegistry_, presenceResponse_ };`,
+  )({ formatDate: () => "2030-01-01T00:00:00+09:00" });
+  const now = Date.now();
+  const active = helpers.prunePresenceRegistry_({
+    mine: now,
+    other: now - 10_000,
+    expired: now - 91_000,
+  }, now);
+  assert.deepEqual(Object.keys(active), ["mine", "other"]);
+  assert.equal(helpers.presenceResponse_(active, "mine", false).online_count, 1);
+  assert.equal(helpers.presenceResponse_({ mine: now }, "mine", false).online_count, 0);
+
+  const crowded = Object.fromEntries(
+    Array.from({ length: 300 }, (_, index) => [`client-${index}`, now - index]),
+  );
+  assert.equal(Object.keys(helpers.prunePresenceRegistry_(crowded, now)).length, 250);
 });
 
 test("자리배치는 6행 5열 기본값과 자연키 upsert, 참조 검증을 사용한다", () => {

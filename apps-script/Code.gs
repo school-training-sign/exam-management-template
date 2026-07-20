@@ -92,7 +92,7 @@ function doPost(event) {
     const data = dispatch_(request);
     return jsonOutput_({ ok: true, data: data, error: null });
   } catch (error) {
-    if (!error.auditLogged) {
+    if (!error.auditLogged && request.action !== "presence_ping") {
       try {
         appendAudit_("unknown", request.action || "unknown", "api", "", 0, false, error.code || "REQUEST_FAILED");
         error.auditLogged = true;
@@ -131,6 +131,11 @@ function dispatch_(request) {
   if (!action) throw apiError_("INVALID_ACTION", "작업 이름이 없습니다.");
   if (action === "school_login") return schoolLogin_(request);
   if (action === "logout") return logout_(request);
+
+  if (action === "presence_ping") {
+    requireSession_(request.school_session, "teacher", request.user_active === true);
+    return presencePing_(request);
+  }
 
   const teacher = requireSession_(request.school_session, "teacher");
   if (action === "admin_login") return adminLogin_(request, teacher);
@@ -208,9 +213,91 @@ function adminLogin_(request) {
 
 function logout_(request) {
   const cache = CacheService.getScriptCache();
+  leavePresence_(request.school_session);
   if (request.school_session) cache.remove("session:" + request.school_session);
   if (request.admin_session) cache.remove("session:" + request.admin_session);
   return { logged_out: true };
+}
+
+function presenceIdentity_(schoolSession) {
+  const token = String(schoolSession || "").trim();
+  if (!token) return "";
+  return hashSecret_(token, "presence-v1").slice(0, 43);
+}
+
+function readPresenceRegistry_(cache) {
+  try {
+    const parsed = JSON.parse(cache.get("presence:registry:v1") || "{}");
+    if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") return {};
+    return Object.keys(parsed).reduce((result, key) => {
+      const lastSeen = Number(parsed[key]);
+      if (/^[A-Za-z0-9_-]{20,50}$/.test(key) && Number.isFinite(lastSeen)) result[key] = lastSeen;
+      return result;
+    }, {});
+  } catch (ignored) {
+    return {};
+  }
+}
+
+function prunePresenceRegistry_(registry, nowMs) {
+  const cutoff = nowMs - APP.PRESENCE_WINDOW_SECONDS * 1000;
+  return Object.fromEntries(
+    Object.entries(registry)
+      .filter((entry) => Number(entry[1]) >= cutoff)
+      .sort((left, right) => Number(right[1]) - Number(left[1]))
+      .slice(0, APP.PRESENCE_MAX_ENTRIES)
+  );
+}
+
+function presenceResponse_(registry, ownIdentity, stale) {
+  return {
+    connected: true,
+    online_count: Object.keys(registry).filter((key) => key !== ownIdentity).length,
+    observed_at: nowIso_(),
+    active_window_seconds: APP.PRESENCE_WINDOW_SECONDS,
+    approximate: true,
+    stale: Boolean(stale),
+  };
+}
+
+function presencePing_(request) {
+  const ownIdentity = presenceIdentity_(request.school_session);
+  if (!ownIdentity) throw apiError_("SESSION_REQUIRED", "로그인이 필요합니다.");
+  const cache = CacheService.getScriptCache();
+  const nowMs = Date.now();
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(APP.PRESENCE_LOCK_WAIT_MS)) {
+    return presenceResponse_(prunePresenceRegistry_(readPresenceRegistry_(cache), nowMs), ownIdentity, true);
+  }
+  try {
+    const registry = readPresenceRegistry_(cache);
+    registry[ownIdentity] = nowMs;
+    const active = prunePresenceRegistry_(registry, nowMs);
+    cache.put("presence:registry:v1", JSON.stringify(active), APP.PRESENCE_CACHE_TTL_SECONDS);
+    return presenceResponse_(active, ownIdentity, false);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function leavePresence_(schoolSession) {
+  const ownIdentity = presenceIdentity_(schoolSession);
+  if (!ownIdentity) return;
+  const cache = CacheService.getScriptCache();
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(APP.PRESENCE_LOCK_WAIT_MS)) return;
+  try {
+    const registry = readPresenceRegistry_(cache);
+    delete registry[ownIdentity];
+    const active = prunePresenceRegistry_(registry, Date.now());
+    if (Object.keys(active).length) {
+      cache.put("presence:registry:v1", JSON.stringify(active), APP.PRESENCE_CACHE_TTL_SECONDS);
+    } else {
+      cache.remove("presence:registry:v1");
+    }
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function completionKey_(examDate, period, classId) {
@@ -1335,7 +1422,7 @@ function createSession_(role) {
   return token;
 }
 
-function requireSession_(token, role) {
+function requireSession_(token, role, touch) {
   if (!token) throw apiError_("SESSION_REQUIRED", "로그인이 필요합니다.");
   const cache = CacheService.getScriptCache();
   const key = "session:" + token;
@@ -1354,8 +1441,10 @@ function requireSession_(token, role) {
       throw apiError_("ADMIN_SESSION_EXPIRED", "관리자 암호가 변경되어 관리자 세션이 만료되었습니다.");
     }
   }
-  const ttl = role === "admin" ? APP.ADMIN_TTL_SECONDS : APP.TEACHER_TTL_SECONDS;
-  cache.put(key, raw, ttl);
+  if (touch !== false) {
+    const ttl = role === "admin" ? APP.ADMIN_TTL_SECONDS : APP.TEACHER_TTL_SECONDS;
+    cache.put(key, raw, ttl);
+  }
   return session;
 }
 
