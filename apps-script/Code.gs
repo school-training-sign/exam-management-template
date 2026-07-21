@@ -165,6 +165,8 @@ function route_(action, request) {
     case "delete_student": return deleteStudent_(request);
     case "save_timetable": return saveTimetable_(request);
     case "delete_timetable": return deleteTimetable_(request);
+    case "save_subject_catalog": return saveSubjectCatalog_(request);
+    case "save_exam_notice_settings": return saveExamNoticeSettings_(request);
     case "save_enrollments": return saveEnrollments_(request);
     case "save_seat_chart": return saveSeatChart_(request);
     case "save_seat_charts_batch": return saveSeatChartsBatch_(request);
@@ -1004,6 +1006,108 @@ function saveTimetable_(request) {
   return adminBootstrap_();
 }
 
+function normalizeSubjectCatalogInput_(gradeValue, subjectsValue) {
+  const grade = Number(gradeValue);
+  if (!Number.isInteger(grade) || grade < 1 || grade > 9) {
+    throw apiError_("INVALID_GRADE", "학년을 확인하세요.");
+  }
+  if (!Array.isArray(subjectsValue)) {
+    throw apiError_("INVALID_SUBJECTS", "교과목 목록 형식이 올바르지 않습니다.");
+  }
+  if (subjectsValue.length > 200) {
+    throw apiError_("TOO_MANY_SUBJECTS", "교과목은 한 학년에 200개까지 등록할 수 있습니다.");
+  }
+
+  const seen = new Set();
+  const subjects = subjectsValue.map((value, index) => {
+    const details = { row_number: index + 2 };
+    if (typeof value !== "string") {
+      throw apiError_("INVALID_SUBJECT_NAME", "교과목 이름 형식이 올바르지 않습니다.", details);
+    }
+    const subject = value.trim();
+    if (!subject || subject.length > 80) {
+      throw apiError_("INVALID_SUBJECT_NAME", "교과목 이름은 1자 이상 80자 이하로 입력하세요.", details);
+    }
+    if (seen.has(subject)) {
+      throw apiError_("DUPLICATE_SUBJECT", "중복된 교과목이 있습니다: " + subject, details);
+    }
+    seen.add(subject);
+    return subject;
+  });
+  return { grade: grade, subjects: subjects };
+}
+
+function saveSubjectCatalog_(request) {
+  const normalized = normalizeSubjectCatalogInput_(request.grade, request.subjects);
+  const settings = getSettings_();
+  const catalog = normalizeStoredSubjectCatalog_(settings.subject_catalog_json);
+  catalog[String(normalized.grade)] = normalized.subjects;
+  setSetting_("subject_catalog_json", JSON.stringify(catalog));
+  return adminBootstrap_();
+}
+
+function normalizeExamNoticeInput_(noticeValue) {
+  if (!noticeValue || Array.isArray(noticeValue) || typeof noticeValue !== "object") {
+    throw apiError_("INVALID_EXAM_NOTICE", "가정통신문 설정 형식이 올바르지 않습니다.");
+  }
+
+  const year = Number(noticeValue.year);
+  if (!Number.isInteger(year) || year < 1900 || year > 2200) {
+    throw apiError_("INVALID_ACADEMIC_YEAR", "학년도를 확인하세요.");
+  }
+  const semester = Number(noticeValue.semester);
+  if (semester !== 1 && semester !== 2) {
+    throw apiError_("INVALID_SEMESTER", "학기는 1학기 또는 2학기로 입력하세요.");
+  }
+
+  const examName = String(noticeValue.exam_name || "").trim();
+  if (!examName) throw apiError_("EXAM_NAME_REQUIRED", "고사명을 입력하세요.");
+  if (examName.length > 80) throw apiError_("INVALID_EXAM_NAME", "고사명은 80자 이하로 입력하세요.");
+
+  const greeting = String(noticeValue.greeting || "").trim();
+  if (greeting.length > 1500) throw apiError_("INVALID_GREETING", "인사말은 1,500자 이하로 입력하세요.");
+
+  if (!Array.isArray(noticeValue.notes) || noticeValue.notes.length > 20) {
+    throw apiError_("INVALID_NOTICE_NOTES", "안내사항은 20개 이하의 목록으로 입력하세요.");
+  }
+  const notes = noticeValue.notes.map((value, index) => {
+    const details = { item_number: index + 1 };
+    if (typeof value !== "string") {
+      throw apiError_("INVALID_NOTICE_NOTE", "안내사항 형식이 올바르지 않습니다.", details);
+    }
+    const note = value.trim();
+    if (!note || note.length > 200) {
+      throw apiError_("INVALID_NOTICE_NOTE", "안내사항은 항목마다 1자 이상 200자 이하로 입력하세요.", details);
+    }
+    return note;
+  });
+
+  const issueDate = String(noticeValue.issue_date || "").trim();
+  if (issueDate && !isValidIsoDate_(issueDate)) {
+    throw apiError_("INVALID_ISSUE_DATE", "발행일을 확인하세요.");
+  }
+
+  const issuer = String(noticeValue.issuer || "").trim();
+  if (!issuer) throw apiError_("NOTICE_ISSUER_REQUIRED", "발행 명의를 입력하세요.");
+  if (issuer.length > 100) throw apiError_("INVALID_NOTICE_ISSUER", "발행 명의는 100자 이하로 입력하세요.");
+
+  return {
+    year: year,
+    semester: semester,
+    exam_name: examName,
+    greeting: greeting,
+    notes: notes,
+    issue_date: issueDate,
+    issuer: issuer,
+  };
+}
+
+function saveExamNoticeSettings_(request) {
+  const notice = normalizeExamNoticeInput_(request.notice);
+  setSetting_("exam_notice_json", JSON.stringify(notice));
+  return adminBootstrap_();
+}
+
 function timetableDeleteImpact_(target, timetable) {
   const remainingSubjectRows = timetable.filter((item) =>
     String(item.id) !== String(target.id) &&
@@ -1423,6 +1527,7 @@ function inferCount_(request) {
   if (Array.isArray(request.rows)) return request.rows.length;
   if (Array.isArray(request.students)) return request.students.length;
   if (Array.isArray(request.timetable)) return request.timetable.length;
+  if (Array.isArray(request.subjects)) return request.subjects.length;
   if (Array.isArray(request.enrollments)) return request.enrollments.length;
   if (Array.isArray(request.charts)) return request.charts.length;
   return 1;

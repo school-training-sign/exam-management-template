@@ -36,6 +36,10 @@ function ensureSheets_() {
   if (!schema || String(schema.value) !== APP.SCHEMA_VERSION) {
     setSetting_("schema_version", APP.SCHEMA_VERSION);
   }
+  const version = settings.find((item) => String(item.key) === "version");
+  if (!version || String(version.value) !== APP.VERSION) {
+    setSetting_("version", APP.VERSION);
+  }
 }
 
 function ensureTableSheet_(spreadsheet, name, requiredHeaders) {
@@ -168,6 +172,61 @@ function parseJson_(value, fallback) {
   try { return JSON.parse(String(value)); } catch (error) { return fallback; }
 }
 
+function isValidIsoDate_(value) {
+  const text = String(value || "").trim();
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+}
+
+function normalizeStoredSubjectCatalog_(value) {
+  const parsed = parseJson_(value, {});
+  if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") return {};
+  const result = {};
+  Object.keys(parsed).forEach((key) => {
+    const grade = Number(key);
+    if (!Number.isInteger(grade) || grade < 1 || grade > 9 || !Array.isArray(parsed[key])) return;
+    const seen = new Set();
+    const subjects = [];
+    parsed[key].forEach((item) => {
+      const subject = typeof item === "string" ? item.trim() : "";
+      if (!subject || subject.length > 80 || seen.has(subject) || subjects.length >= 200) return;
+      seen.add(subject);
+      subjects.push(subject);
+    });
+    result[String(grade)] = subjects;
+  });
+  return result;
+}
+
+function normalizeStoredExamNotice_(value, schoolName) {
+  const parsedValue = parseJson_(value, {});
+  const parsed = parsedValue && !Array.isArray(parsedValue) && typeof parsedValue === "object" ? parsedValue : {};
+  const academicYear = Number(parsed.year || parsed.academic_year);
+  const semester = Number(parsed.semester);
+  const notes = Array.isArray(parsed.notes)
+    ? parsed.notes.map((item) => typeof item === "string" ? item.trim() : "")
+      .filter((item) => item && item.length <= 200)
+      .slice(0, 20)
+    : [];
+  const defaultIssuer = String(schoolName || "").trim();
+  return {
+    year: Number.isInteger(academicYear) && academicYear >= 1900 && academicYear <= 2200 ? academicYear : "",
+    semester: semester === 1 || semester === 2 ? semester : "",
+    exam_name: String(parsed.exam_name || "").trim().slice(0, 80),
+    greeting: String(parsed.greeting || "").trim().slice(0, 1500),
+    notes: notes,
+    issue_date: isValidIsoDate_(parsed.issue_date)
+      ? String(parsed.issue_date).trim()
+      : "",
+    issuer: String(parsed.issuer || "").trim().slice(0, 100) || (defaultIssuer ? defaultIssuer + "장" : ""),
+  };
+}
+
 function normalizeClassIds_(value) {
   let values = value;
   if (typeof value === "string") {
@@ -247,6 +306,8 @@ function teacherBootstrap_() {
 
 function adminBootstrap_() {
   const result = teacherBootstrap_();
+  result.subject_catalog = normalizeStoredSubjectCatalog_(result.settings.subject_catalog_json);
+  result.exam_notice = normalizeStoredExamNotice_(result.settings.exam_notice_json, result.settings.school_name);
   result.students = getRecords_(SHEETS.STUDENTS).filter(isActive_);
   result.timetable = getRecords_(SHEETS.TIMETABLE).map((item) => Object.assign({}, item, {
     class_ids: normalizeClassIds_(item.class_ids),

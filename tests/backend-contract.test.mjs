@@ -216,3 +216,97 @@ test("집계와 학급 ID 정규화 헬퍼가 기대한 결과를 만든다", ()
     "own|2030-01-01|1|3|c1||",
   );
 });
+
+test("교과목·가정통신문 저장 액션은 관리자 전용 잠금 작업으로 라우팅된다", () => {
+  const mutationBlock = source["Config.gs"].match(/const MUTATION_ACTIONS[\s\S]*?\]\);/)?.[0] || "";
+  const adminBlock = source["Config.gs"].match(/const ADMIN_ACTIONS[\s\S]*?\]\);/)?.[0] || "";
+  for (const action of ["save_subject_catalog", "save_exam_notice_settings"]) {
+    assert.match(mutationBlock, new RegExp(`"${action}"`));
+    assert.match(adminBlock, new RegExp(`"${action}"`));
+    assert.match(source["Code.gs"], new RegExp(`case "${action}"`));
+  }
+  assert.match(source["Code.gs"], /setSetting_\("subject_catalog_json", JSON\.stringify\(catalog\)\)/);
+  assert.match(source["Code.gs"], /setSetting_\("exam_notice_json", JSON\.stringify\(notice\)\)/);
+  assert.match(source["Repository.gs"], /result\.subject_catalog = normalizeStoredSubjectCatalog_/);
+  assert.match(source["Repository.gs"], /result\.exam_notice = normalizeStoredExamNotice_/);
+  assert.match(source["Code.gs"], /Array\.isArray\(request\.subjects\)[\s\S]*request\.subjects\.length/);
+});
+
+test("교과목 카탈로그는 학년·개수·길이·trim 중복을 검증한다", () => {
+  const helpers = new Function(
+    `${all}\nreturn { normalizeSubjectCatalogInput_, normalizeStoredSubjectCatalog_, inferCount_ };`,
+  )();
+  assert.deepEqual(
+    helpers.normalizeSubjectCatalogInput_(1, [" 국어 ", "영어"]),
+    { grade: 1, subjects: ["국어", "영어"] },
+  );
+  assert.deepEqual(helpers.normalizeSubjectCatalogInput_(9, []), { grade: 9, subjects: [] });
+  assert.deepEqual(
+    helpers.normalizeStoredSubjectCatalog_('{"1":[" 국어 ","국어","영어"],"10":["제외"]}'),
+    { "1": ["국어", "영어"] },
+  );
+  assert.equal(helpers.inferCount_({ subjects: ["국어", "영어"] }), 2);
+  assert.throws(() => helpers.normalizeSubjectCatalogInput_(0, []), { code: "INVALID_GRADE" });
+  assert.throws(() => helpers.normalizeSubjectCatalogInput_(1, "국어"), { code: "INVALID_SUBJECTS" });
+  assert.throws(() => helpers.normalizeSubjectCatalogInput_(1, Array(201).fill("과목")), { code: "TOO_MANY_SUBJECTS" });
+  assert.throws(() => helpers.normalizeSubjectCatalogInput_(1, ["국어", " 국어 "]), { code: "DUPLICATE_SUBJECT" });
+  assert.throws(() => helpers.normalizeSubjectCatalogInput_(1, [" "]), { code: "INVALID_SUBJECT_NAME" });
+  assert.throws(() => helpers.normalizeSubjectCatalogInput_(1, ["가".repeat(81)]), { code: "INVALID_SUBJECT_NAME" });
+});
+
+test("가정통신문 설정은 표준 형태와 모든 길이·날짜 제한을 적용한다", () => {
+  const helpers = new Function(
+    `${all}\nreturn { normalizeExamNoticeInput_, normalizeStoredExamNotice_, isValidIsoDate_ };`,
+  )();
+  const notice = helpers.normalizeExamNoticeInput_({
+    year: "2026",
+    semester: "2",
+    exam_name: " 2학기 중간고사 ",
+    greeting: " 안내드립니다. ",
+    notes: [" 준비물을 확인하세요. "],
+    issue_date: "2026-09-01",
+    issuer: " 한양대학교사범대학부속고등학교장 ",
+  });
+  assert.deepEqual(notice, {
+    year: 2026,
+    semester: 2,
+    exam_name: "2학기 중간고사",
+    greeting: "안내드립니다.",
+    notes: ["준비물을 확인하세요."],
+    issue_date: "2026-09-01",
+    issuer: "한양대학교사범대학부속고등학교장",
+  });
+  assert.equal(Object.hasOwn(notice, "academic_year"), false);
+  assert.equal(helpers.isValidIsoDate_("2026-02-28"), true);
+  assert.equal(helpers.isValidIsoDate_("2026-02-30"), false);
+  assert.deepEqual(helpers.normalizeStoredExamNotice_("{}", "한양대학교사범대학부속고등학교"), {
+    year: "",
+    semester: "",
+    exam_name: "",
+    greeting: "",
+    notes: [],
+    issue_date: "",
+    issuer: "한양대학교사범대학부속고등학교장",
+  });
+
+  const base = { year: 2026, semester: 1, exam_name: "중간고사", greeting: "", notes: [], issue_date: "", issuer: "학교장" };
+  assert.throws(() => helpers.normalizeExamNoticeInput_({ ...base, year: 1899 }), { code: "INVALID_ACADEMIC_YEAR" });
+  assert.throws(() => helpers.normalizeExamNoticeInput_({ ...base, semester: 3 }), { code: "INVALID_SEMESTER" });
+  assert.throws(() => helpers.normalizeExamNoticeInput_({ ...base, exam_name: "" }), { code: "EXAM_NAME_REQUIRED" });
+  assert.throws(() => helpers.normalizeExamNoticeInput_({ ...base, exam_name: "가".repeat(81) }), { code: "INVALID_EXAM_NAME" });
+  assert.throws(() => helpers.normalizeExamNoticeInput_({ ...base, greeting: "가".repeat(1501) }), { code: "INVALID_GREETING" });
+  assert.throws(() => helpers.normalizeExamNoticeInput_({ ...base, notes: Array(21).fill("안내") }), { code: "INVALID_NOTICE_NOTES" });
+  assert.throws(() => helpers.normalizeExamNoticeInput_({ ...base, notes: [""] }), { code: "INVALID_NOTICE_NOTE" });
+  assert.throws(() => helpers.normalizeExamNoticeInput_({ ...base, issue_date: "2026-02-30" }), { code: "INVALID_ISSUE_DATE" });
+  assert.throws(() => helpers.normalizeExamNoticeInput_({ ...base, issuer: "" }), { code: "NOTICE_ISSUER_REQUIRED" });
+  assert.throws(() => helpers.normalizeExamNoticeInput_({ ...base, issuer: "가".repeat(101) }), { code: "INVALID_NOTICE_ISSUER" });
+});
+
+test("새 설정은 시트 열 추가 없이 설정 JSON으로 저장된다", () => {
+  assert.match(source["Config.gs"], /VERSION:\s*"2\.3\.0"/);
+  assert.match(source["Config.gs"], /SCHEMA_VERSION:\s*"3"/);
+  assert.match(source["Config.gs"], /\[SHEETS\.SETTINGS\]: \["key", "value", "updated_at"\]/);
+  assert.equal((source["Config.gs"].match(/\[SHEETS\.[A-Z_]+\]: \[/g) || []).length, 10);
+  assert.match(source["Repository.gs"], /setSetting_\("version", APP\.VERSION\)/);
+  assert.match(source["Repository.gs"], /function setSetting_[\s\S]*replaceRecords_\(SHEETS\.SETTINGS, rows\)/);
+});
