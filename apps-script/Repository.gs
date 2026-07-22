@@ -14,14 +14,18 @@ function ensureSheets_() {
 
   let guide = spreadsheet.getSheetByName(SHEETS.GUIDE);
   if (!guide) guide = spreadsheet.insertSheet(SHEETS.GUIDE, 0);
-  if (guide.getLastRow() === 0) {
+  const guideText = guide.getLastRow() ? guide.getDataRange().getDisplayValues().flat().join(" ") : "";
+  if (!guideText.includes(APP.SYSTEM_NAME) || !guideText.includes(APP.VERSION) || guideText.includes(["학교", "코드"].join(""))) {
+    const oldGuideRange = guide.getDataRange();
+    oldGuideRange.breakApart();
+    oldGuideRange.clearContent();
     guide.getRange("A1:B8").setValues([
-      ["정기고사 관리 시스템", "배포용 원본"],
+      [APP.SYSTEM_NAME, "배포용 원본"],
       ["1", "상단 메뉴 '정기고사 관리 > 초기 설정'을 실행합니다."],
-      ["2", "학교명, 학교코드, 관리자 암호를 입력합니다."],
+      ["2", "학교명과 관리자 암호를 입력합니다."],
       ["3", "Apps Script를 웹 앱으로 배포합니다. 실행 사용자는 본인, 접근 권한은 조직 정책이 허용하는 범위로 설정합니다."],
       ["4", "웹 앱 주소를 GitHub Pages 공개 설정의 API_URL에 입력합니다."],
-      ["보안", "학교코드와 관리자 암호의 원문은 시트에 저장되지 않습니다."],
+      ["접속", "웹 화면의 관리자 설정으로 들어가 접속 이름과 개인 PIN 6자리를 등록합니다."],
       ["데이터", "학생 이름은 학생 시트에만 저장되며 감사로그에는 남기지 않습니다."],
       ["버전", APP.VERSION],
     ]);
@@ -31,6 +35,13 @@ function ensureSheets_() {
     guide.getRange("A1:B8").setWrap(true).setVerticalAlignment("middle");
   }
 
+  const properties = PropertiesService.getScriptProperties();
+  if (!properties.getProperty(APP.PROPERTY_ACCESS_USER_PEPPER)) {
+    properties.setProperty(APP.PROPERTY_ACCESS_USER_PEPPER, randomToken_() + randomToken_());
+  }
+  properties.deleteProperty(["SCHOOL", "CODE", "SALT"].join("_"));
+  properties.deleteProperty(["SCHOOL", "CODE", "HASH"].join("_"));
+
   const settings = getRecords_(SHEETS.SETTINGS);
   const schema = settings.find((item) => String(item.key) === "schema_version");
   if (!schema || String(schema.value) !== APP.SCHEMA_VERSION) {
@@ -39,6 +50,10 @@ function ensureSheets_() {
   const version = settings.find((item) => String(item.key) === "version");
   if (!version || String(version.value) !== APP.VERSION) {
     setSetting_("version", APP.VERSION);
+  }
+  const appName = settings.find((item) => String(item.key) === "app_name");
+  if (!appName || String(appName.value) !== APP.SYSTEM_NAME) {
+    setSetting_("app_name", APP.SYSTEM_NAME);
   }
 }
 
@@ -138,19 +153,23 @@ function sanitizeAuditDetail_(success, detail) {
   return (code || "REQUEST_FAILED").slice(0, 80);
 }
 
-function appendAudit_(role, action, targetType, targetId, count, success, detail) {
+function appendAudit_(role, action, targetType, targetId, count, success, detail, actorId) {
   const sheet = getSpreadsheet_().getSheetByName(SHEETS.AUDIT);
-  sheet.appendRow([
-    createId_("audit"),
-    nowIso_(),
-    String(role || "").slice(0, 20),
-    String(action || "").slice(0, 60),
-    String(targetType || "").slice(0, 30),
-    String(targetId || "").slice(0, 100),
-    Number(count) || 0,
-    Boolean(success),
-    sanitizeAuditDetail_(Boolean(success), detail),
-  ]);
+  const width = Math.max(sheet.getLastColumn(), HEADERS[SHEETS.AUDIT].length);
+  const headers = sheet.getRange(1, 1, 1, width).getValues()[0].map((value) => String(value || "").trim());
+  const record = {
+    id: createId_("audit"),
+    occurred_at: nowIso_(),
+    role: String(role || "").slice(0, 20),
+    actor_id: String(actorId || "").slice(0, 100),
+    action: String(action || "").slice(0, 60),
+    target_type: String(targetType || "").slice(0, 30),
+    target_id: String(targetId || "").slice(0, 100),
+    count: Number(count) || 0,
+    success: Boolean(success),
+    detail: sanitizeAuditDetail_(Boolean(success), detail),
+  };
+  sheet.appendRow(headers.map((header) => Object.prototype.hasOwnProperty.call(record, header) ? record[header] : ""));
 }
 
 function getSettings_() {
@@ -159,11 +178,90 @@ function getSettings_() {
   return result;
 }
 
+function getPublicSettings_() {
+  const settings = getSettings_();
+  return ["school_name", "app_name", "timezone", "version", "schema_version"].reduce((result, key) => {
+    if (Object.prototype.hasOwnProperty.call(settings, key)) result[key] = settings[key];
+    return result;
+  }, {});
+}
+
 function setSetting_(key, value) {
   const now = nowIso_();
   const rows = getRecords_(SHEETS.SETTINGS).filter((item) => String(item.key) !== String(key));
   rows.push({ key: key, value: value, updated_at: now });
   replaceRecords_(SHEETS.SETTINGS, rows);
+}
+
+function accessUserSettingKey_(id) {
+  return APP.ACCESS_USER_SETTING_PREFIX + String(id || "").trim();
+}
+
+function normalizeStoredAccessUser_(row) {
+  if (!row || !String(row.key || "").startsWith(APP.ACCESS_USER_SETTING_PREFIX)) return null;
+  const parsed = parseJson_(row.value, null);
+  if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") return null;
+  const id = String(row.key).slice(APP.ACCESS_USER_SETTING_PREFIX.length).trim();
+  const loginName = canonicalLoginName_(parsed.login_name);
+  if (!id || !loginName || !parsed.pin_salt || !parsed.pin_hash) return null;
+  return {
+    id: id,
+    login_name: loginName,
+    normalized_login_name: loginLookupKey_(loginName),
+    active: parsed.active === true,
+    session_version: Math.max(1, Number(parsed.session_version) || 1),
+    pin_salt: String(parsed.pin_salt),
+    pin_hash: String(parsed.pin_hash),
+    created_at: String(parsed.created_at || row.updated_at || ""),
+    updated_at: String(parsed.updated_at || row.updated_at || ""),
+  };
+}
+
+function getAccessUsers_() {
+  return getRecords_(SHEETS.SETTINGS)
+    .map(normalizeStoredAccessUser_)
+    .filter(Boolean);
+}
+
+function findAccessUserById_(id) {
+  const wanted = String(id || "").trim();
+  return getAccessUsers_().find((user) => user.id === wanted) || null;
+}
+
+function findAccessUserByLogin_(loginName) {
+  const lookup = loginLookupKey_(loginName);
+  return getAccessUsers_().find((user) => user.normalized_login_name === lookup) || null;
+}
+
+function safeAccessUser_(user) {
+  return {
+    id: String(user.id),
+    login_name: String(user.login_name),
+    active: user.active === true,
+    updated_at: String(user.updated_at || ""),
+  };
+}
+
+function accessUsersForAdmin_() {
+  return getAccessUsers_()
+    .map(safeAccessUser_)
+    .sort((left, right) => left.login_name.localeCompare(right.login_name, "ko"));
+}
+
+function writeAccessUser_(user) {
+  const stored = {
+    id: String(user.id),
+    login_name: canonicalLoginName_(user.login_name),
+    normalized_login_name: loginLookupKey_(user.login_name),
+    active: user.active === true,
+    session_version: Math.max(1, Number(user.session_version) || 1),
+    pin_salt: String(user.pin_salt),
+    pin_hash: String(user.pin_hash),
+    created_at: String(user.created_at || nowIso_()),
+    updated_at: String(user.updated_at || nowIso_()),
+  };
+  setSetting_(accessUserSettingKey_(stored.id), JSON.stringify(stored));
+  return stored;
 }
 
 function parseJson_(value, fallback) {
@@ -298,7 +396,7 @@ function seatNaturalKey_(chart) {
 
 function teacherBootstrap_() {
   return {
-    settings: getSettings_(),
+    settings: getPublicSettings_(),
     classes: getRecords_(SHEETS.CLASSES).filter(isActive_),
     exam_dates: getRecords_(SHEETS.EXAM_DATES).filter(isActive_),
   };
@@ -306,8 +404,10 @@ function teacherBootstrap_() {
 
 function adminBootstrap_() {
   const result = teacherBootstrap_();
-  result.subject_catalog = normalizeStoredSubjectCatalog_(result.settings.subject_catalog_json);
-  result.exam_notice = normalizeStoredExamNotice_(result.settings.exam_notice_json, result.settings.school_name);
+  const privateSettings = getSettings_();
+  result.subject_catalog = normalizeStoredSubjectCatalog_(privateSettings.subject_catalog_json);
+  result.exam_notice = normalizeStoredExamNotice_(privateSettings.exam_notice_json, result.settings.school_name);
+  result.access_users = accessUsersForAdmin_();
   result.students = getRecords_(SHEETS.STUDENTS).filter(isActive_);
   result.timetable = getRecords_(SHEETS.TIMETABLE).map((item) => Object.assign({}, item, {
     class_ids: normalizeClassIds_(item.class_ids),

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
@@ -11,24 +12,86 @@ const source = Object.fromEntries(
 );
 const all = Object.values(source).join("\n");
 
+function createLoginRateHarness(startMs = 2_000_000_000_000) {
+  const clock = { now: startMs };
+  const cacheValues = new Map();
+  const propertyValues = new Map();
+  const cache = {
+    get(key) {
+      const item = cacheValues.get(key);
+      if (!item) return null;
+      if (item.expires_at <= clock.now) {
+        cacheValues.delete(key);
+        return null;
+      }
+      return item.value;
+    },
+    put(key, value, ttlSeconds) {
+      cacheValues.set(key, { value: String(value), expires_at: clock.now + Number(ttlSeconds) * 1000 });
+    },
+    remove: (key) => cacheValues.delete(key),
+    removeAll: (keys) => keys.forEach((key) => cacheValues.delete(key)),
+  };
+  const properties = {
+    getProperties: () => Object.fromEntries(propertyValues),
+    getProperty: (key) => propertyValues.get(key) || null,
+    setProperty: (key, value) => propertyValues.set(key, String(value)),
+    setProperties(values, deleteAllOthers) {
+      if (deleteAllOthers) propertyValues.clear();
+      Object.entries(values).forEach(([key, value]) => propertyValues.set(key, String(value)));
+    },
+    deleteProperty: (key) => propertyValues.delete(key),
+  };
+  const lock = { tryLock: () => true, releaseLock: () => {} };
+  const utilities = {
+    DigestAlgorithm: { SHA_256: "SHA_256" },
+    Charset: { UTF_8: "UTF_8" },
+    computeDigest(_algorithm, value) {
+      return createHash("sha256").update(String(value), "utf8").digest();
+    },
+    base64EncodeWebSafe: (bytes) => Buffer.from(bytes).toString("base64url"),
+  };
+  const helpers = new Function(
+    "CacheService",
+    "PropertiesService",
+    "LockService",
+    "Utilities",
+    "clock",
+    `${all}
+    nowMillis_ = () => clock.now;
+    return {
+      loginRateKeys_, loginRateStorageKey_, assertLoginAllowed_, recordLoginFailure_, clearLoginFailures_,
+      readLoginRateState_, writeLoginRateState_
+    };`,
+  )(
+    { getScriptCache: () => cache },
+    { getScriptProperties: () => properties },
+    { getScriptLock: () => lock },
+    utilities,
+    clock,
+  );
+  return { helpers, clock, cacheValues, propertyValues };
+}
+
 test("Apps Script 파일이 JavaScript 문법으로 파싱된다", () => {
   for (const [name, content] of Object.entries(source)) {
     assert.doesNotThrow(() => new Function(content), name);
   }
 });
 
-test("학교코드와 관리자 암호 원문이 배포 파일에 없다", () => {
+test("이전 학교코드 로그인 계약과 관리자 암호 원문이 배포 파일에 없다", () => {
   assert.equal(
     /(?:school[_-]?code|학교코드)\s*[:=]\s*["'][A-Z0-9_-]{6,}["']/i.test(all),
     false,
   );
   assert.equal(/ADMIN_PASSWORD\s*[:=]\s*["'][^"']+/.test(all), false);
+  assert.doesNotMatch(all, /school_login|school_session|request\.school_code/);
 });
 
 test("요청 응답 형식과 권한 액션이 명시되어 있다", () => {
   assert.match(source["Code.gs"], /ok:\s*true,\s*data:/);
   assert.match(source["Code.gs"], /ok:\s*false,\s*data:\s*null,\s*error:/);
-  for (const action of ["school_login", "admin_login", "presence_ping", "submit_absence_input", "get_hq_status", "save_seat_charts_batch", "cleanup"]) {
+  for (const action of ["user_login", "admin_entry_login", "admin_login", "presence_ping", "submit_absence_input", "get_hq_status", "save_seat_charts_batch", "cleanup"]) {
     assert.match(all, new RegExp(action));
   }
   assert.doesNotMatch(source["Config.gs"], /"set_absence"|"complete_input"/);
@@ -43,18 +106,253 @@ test("모든 쓰기에 잠금과 중복 방지 키를 사용한다", () => {
   assert.match(source["Code.gs"], /cachedAfterLock/);
 });
 
-test("소금값 해시와 5분 세션 만료 정책이 있다", () => {
+test("PIN 소금값·비공개 pepper 해시와 5분 세션 만료 정책이 있다", () => {
   assert.match(source["Code.gs"], /DigestAlgorithm\.SHA_256/);
-  assert.match(source["Config.gs"], /TEACHER_TTL_SECONDS:\s*300/);
+  assert.match(source["Config.gs"], /USER_TTL_SECONDS:\s*300/);
   assert.match(source["Config.gs"], /ADMIN_TTL_SECONDS:\s*300/);
+  assert.match(source["Config.gs"], /PROPERTY_ACCESS_USER_PEPPER:\s*"ACCESS_USER_PEPPER"/);
+  assert.match(source["Code.gs"], /function hashAccessPin_[\s\S]*PROPERTY_ACCESS_USER_PEPPER/);
   assert.match(source["Code.gs"], /CacheService\.getScriptCache\(\)/);
+});
+
+test("접속 이름과 6자리 PIN 로그인은 단일 실패 코드와 세 가지 시도 제한을 사용한다", () => {
+  const loginBlock = source["Code.gs"].match(/function userLogin_[\s\S]*?\n}\n\nfunction verifyAdminPassword_/)?.[0] || "";
+  assert.match(loginBlock, /request\.login_name/);
+  assert.match(loginBlock, /\^\\d\{6\}\$/);
+  assert.match(loginBlock, /INVALID_LOGIN/);
+  assert.doesNotMatch(loginBlock, /USER_NOT_FOUND|USER_INACTIVE|INVALID_PIN/);
+  assert.match(source["Code.gs"], /:client:/);
+  assert.match(source["Code.gs"], /:name:/);
+  assert.match(source["Code.gs"], /:global/);
+  assert.match(source["Code.gs"], /login-name-rate-v1/);
+});
+
+test("브라우저·이름 제한은 Cache가 사라져도 8회 실패 뒤 차단한다", () => {
+  const runtime = createLoginRateHarness();
+  const keys = runtime.helpers.loginRateKeys_("user", { client_id: "raw-client-id" }, "테스트 교사");
+  for (let index = 0; index < 8; index += 1) {
+    assert.doesNotThrow(() => runtime.helpers.assertLoginAllowed_(keys));
+    runtime.helpers.recordLoginFailure_(keys);
+  }
+  runtime.cacheValues.clear();
+  assert.throws(() => runtime.helpers.assertLoginAllowed_(keys), { code: "LOGIN_RATE_LIMIT" });
+
+  const persisted = [...runtime.propertyValues.entries()]
+    .filter(([key]) => key.startsWith("LOGIN_RATE_STATE_"))
+    .map(([, value]) => value)
+    .join("");
+  assert.doesNotMatch(persisted, /raw-client-id|테스트 교사/);
+});
+
+test("서로 다른 브라우저와 이름도 전역 40회 실패 뒤 차단한다", () => {
+  const runtime = createLoginRateHarness();
+  for (let index = 0; index < 40; index += 1) {
+    const keys = runtime.helpers.loginRateKeys_("user", { client_id: `client-${index}` }, `교사-${index}`);
+    assert.doesNotThrow(() => runtime.helpers.assertLoginAllowed_(keys));
+    runtime.helpers.recordLoginFailure_(keys);
+  }
+  const nextKeys = runtime.helpers.loginRateKeys_("user", { client_id: "new-client" }, "새 교사");
+  assert.throws(() => runtime.helpers.assertLoginAllowed_(nextKeys), { code: "LOGIN_RATE_LIMIT" });
+});
+
+test("로그인 성공 시 브라우저·이름 카운터만 초기화하고 전역 카운터는 유지한다", () => {
+  const runtime = createLoginRateHarness();
+  const keys = runtime.helpers.loginRateKeys_("user", { client_id: "client-success" }, "성공 교사");
+  for (let index = 0; index < 3; index += 1) runtime.helpers.recordLoginFailure_(keys);
+  runtime.helpers.clearLoginFailures_(keys);
+
+  const state = runtime.helpers.readLoginRateState_(runtime.clock.now).entries;
+  const clientKey = runtime.helpers.loginRateStorageKey_(keys[0].key);
+  const nameKey = runtime.helpers.loginRateStorageKey_(keys[1].key);
+  const globalKey = runtime.helpers.loginRateStorageKey_(keys[2].key);
+  assert.equal(state[clientKey], undefined);
+  assert.equal(state[nameKey], undefined);
+  assert.equal(state[globalKey].count, 3);
+  assert.equal(runtime.cacheValues.has(keys[0].key), false);
+  assert.equal(runtime.cacheValues.has(keys[1].key), false);
+  assert.equal(runtime.cacheValues.has(keys[2].key), true);
+});
+
+test("로그인 제한 카운터는 마지막 실패 5분 뒤 만료된다", () => {
+  const runtime = createLoginRateHarness();
+  const keys = runtime.helpers.loginRateKeys_("user", { client_id: "client-expiry" }, "만료 교사");
+  for (let index = 0; index < 8; index += 1) runtime.helpers.recordLoginFailure_(keys);
+  assert.throws(() => runtime.helpers.assertLoginAllowed_(keys), { code: "LOGIN_RATE_LIMIT" });
+
+  runtime.clock.now += 300_001;
+  assert.doesNotThrow(() => runtime.helpers.assertLoginAllowed_(keys));
+  const state = runtime.helpers.readLoginRateState_(runtime.clock.now).entries;
+  keys.forEach((item) => assert.equal(state[runtime.helpers.loginRateStorageKey_(item.key)], undefined));
+});
+
+test("영속 로그인 제한 상태는 최근 해시 키 600개로 제한되고 shard 크기를 분산한다", () => {
+  assert.match(source["Config.gs"], /LOGIN_RATE_MAX_ENTRIES:\s*600/);
+  assert.match(source["Config.gs"], /LOGIN_RATE_STATE_SHARDS:\s*12/);
+  assert.match(source["Config.gs"], /PROPERTY_LOGIN_RATE_STATE_PREFIX:\s*"LOGIN_RATE_STATE_"/);
+  const runtime = createLoginRateHarness();
+  const entries = {};
+  for (let index = 0; index < 700; index += 1) {
+    const key = createHash("sha256").update(`entry-${index}`).digest("base64url").slice(0, 32);
+    entries[key] = { count: 1, expires_at: runtime.clock.now + 300_000, updated_at: runtime.clock.now + index };
+  }
+  runtime.helpers.writeLoginRateState_(entries, runtime.clock.now);
+  assert.equal(Object.keys(runtime.helpers.readLoginRateState_(runtime.clock.now).entries).length, 600);
+  const shardValues = [...runtime.propertyValues.entries()]
+    .filter(([key]) => key.startsWith("LOGIN_RATE_STATE_"))
+    .map(([, value]) => value);
+  assert.equal(shardValues.length, 12);
+  assert.ok(shardValues.every((value) => value.length < 9_000));
+});
+
+test("접속 이름 정규화와 PIN 검증 헬퍼가 기대한 결과를 만든다", () => {
+  const helpers = new Function(`${all}\nreturn { canonicalLoginName_, loginLookupKey_, validatePin_, safeAccessUser_ };`)();
+  assert.equal(helpers.canonicalLoginName_("  Ｔｅａｃｈｅｒ   김  "), "Teacher 김");
+  assert.equal(helpers.loginLookupKey_("  ＴＥＡＣＨＥＲ 김  "), "teacher 김");
+  assert.equal(helpers.validatePin_("123456"), "123456");
+  assert.throws(() => helpers.validatePin_("12345"), { code: "INVALID_PIN" });
+  assert.deepEqual(
+    helpers.safeAccessUser_({ id: "u1", login_name: "김민수", active: true, updated_at: "now", pin_salt: "secret", pin_hash: "secret" }),
+    { id: "u1", login_name: "김민수", active: true, updated_at: "now" },
+  );
+});
+
+test("접속 사용자 추가·수정·비활성화·PIN 재설정이 세션 버전을 올린다", () => {
+  const users = [];
+  let uuid = 0;
+  const helpers = new Function(
+    "Utilities",
+    "users",
+    `${all}
+    getAccessUsers_ = () => users.map((user) => ({ ...user }));
+    findAccessUserById_ = (id) => users.find((user) => user.id === String(id)) || null;
+    writeAccessUser_ = (user) => {
+      const index = users.findIndex((item) => item.id === user.id);
+      if (index >= 0) users[index] = { ...user };
+      else users.push({ ...user });
+      return user;
+    };
+    hashAccessPin_ = (pin, salt) => salt + ":" + pin;
+    adminBootstrap_ = () => ({ access_users: users.map(safeAccessUser_) });
+    nowIso_ = () => "2030-01-01T00:00:00+09:00";
+    randomToken_ = () => "salt";
+    return { saveAccessUser_, setAccessUserActive_, resetAccessUserPin_ };`,
+  )({ getUuid: () => `uuid-${++uuid}` }, users);
+
+  helpers.saveAccessUser_({ login_name: " 김민수 ", pin: "123456" });
+  assert.equal(users.length, 1);
+  assert.equal(users[0].login_name, "김민수");
+  assert.equal(users[0].session_version, 1);
+  assert.throws(() => helpers.saveAccessUser_({ login_name: "  김민수  ", pin: "654321" }), { code: "DUPLICATE_LOGIN_NAME" });
+
+  helpers.saveAccessUser_({ id: users[0].id, login_name: "김민수(1학년)" });
+  assert.equal(users[0].session_version, 2);
+  helpers.resetAccessUserPin_({ id: users[0].id, pin: "654321" });
+  assert.equal(users[0].session_version, 3);
+  helpers.setAccessUserActive_({ id: users[0].id, active: false });
+  assert.equal(users[0].active, false);
+  assert.equal(users[0].session_version, 4);
+});
+
+test("사용자 세션은 비활성화·버전 변경·관리자 암호 변경 직후 거부된다", () => {
+  const cacheValues = new Map();
+  const cache = {
+    get: (key) => cacheValues.get(key) || null,
+    put: (key, value) => cacheValues.set(key, value),
+    remove: (key) => cacheValues.delete(key),
+  };
+  const properties = new Map([["ADMIN_SESSION_VERSION", "1"]]);
+  const users = new Map();
+  let uuid = 0;
+  const helpers = new Function(
+    "CacheService",
+    "PropertiesService",
+    "Utilities",
+    "users",
+    `${all}
+    findAccessUserById_ = (id) => users.get(String(id)) || null;
+    return { createUserSession_, requireSession_ };`,
+  )(
+    { getScriptCache: () => cache },
+    { getScriptProperties: () => ({ getProperty: (key) => properties.get(key) || null }) },
+    {
+      getUuid: () => `uuid-${++uuid}`,
+      formatDate: () => "2030-01-01T00:00:00+09:00",
+    },
+    users,
+  );
+
+  const user = { id: "u1", login_name: "김민수", active: true, session_version: 1 };
+  users.set(user.id, user);
+  const disabledToken = helpers.createUserSession_(user);
+  user.active = false;
+  assert.throws(() => helpers.requireSession_(disabledToken, "user"), { code: "SESSION_EXPIRED" });
+
+  user.active = true;
+  const changedToken = helpers.createUserSession_(user);
+  user.session_version += 1;
+  assert.throws(() => helpers.requireSession_(changedToken, "user"), { code: "SESSION_EXPIRED" });
+
+  const adminToken = helpers.createUserSession_({ id: "system_admin", login_name: "관리자" }, true);
+  properties.set("ADMIN_SESSION_VERSION", "2");
+  assert.throws(() => helpers.requireSession_(adminToken, "user"), { code: "SESSION_EXPIRED" });
+});
+
+test("접속 사용자는 설정 시트 JSON에 저장하고 공개 설정에서 제외한다", () => {
+  assert.match(source["Config.gs"], /ACCESS_USER_SETTING_PREFIX:\s*"access_user:"/);
+  assert.match(source["Repository.gs"], /setSetting_\(accessUserSettingKey_\(stored\.id\), JSON\.stringify\(stored\)\)/);
+  assert.match(source["Repository.gs"], /function getPublicSettings_[\s\S]*\["school_name", "app_name", "timezone", "version", "schema_version"\]/);
+  assert.match(source["Repository.gs"], /settings:\s*getPublicSettings_\(\)/);
+  assert.match(source["Repository.gs"], /result\.access_users = accessUsersForAdmin_\(\)/);
+  assert.doesNotMatch(source["Repository.gs"].match(/function safeAccessUser_[\s\S]*?\n}/)?.[0] || "", /pin_salt|pin_hash|normalized_login_name/);
+});
+
+test("관리자 직접 진입은 사용자가 없어도 사용자·관리자 세션과 현재 사용자를 발급한다", () => {
+  const block = source["Code.gs"].match(/function adminEntryLogin_[\s\S]*?\n}\n\nfunction adminLogin_/)?.[0] || "";
+  assert.match(block, /createUserSession_\(currentUser, true\)/);
+  assert.match(block, /createAdminSession_\(currentUser\.id\)/);
+  assert.match(block, /user_session:/);
+  assert.match(block, /admin_session:/);
+  assert.match(block, /current_user:/);
+  assert.match(block, /adminBootstrap_\(\)/);
+  assert.doesNotMatch(block, /getAccessUsers_|findAccessUser/);
+});
+
+test("접속 사용자 관리 액션은 관리자 전용 잠금 작업이며 완전 삭제 액션은 없다", () => {
+  const mutationBlock = source["Config.gs"].match(/const MUTATION_ACTIONS[\s\S]*?\]\);/)?.[0] || "";
+  const adminBlock = source["Config.gs"].match(/const ADMIN_ACTIONS[\s\S]*?\]\);/)?.[0] || "";
+  for (const action of ["save_access_user", "set_access_user_active", "reset_access_user_pin"]) {
+    assert.match(mutationBlock, new RegExp(`"${action}"`));
+    assert.match(adminBlock, new RegExp(`"${action}"`));
+    assert.match(source["Code.gs"], new RegExp(`case "${action}"`));
+  }
+  assert.doesNotMatch(all, /delete_access_user/);
+  assert.match(source["Code.gs"], /DUPLICATE_LOGIN_NAME/);
+  assert.match(source["Code.gs"], /user\.session_version \+= 1/);
+});
+
+test("사용자 세션은 사용자 ID·버전을 검증하고 잠금 획득 뒤 다시 확인한다", () => {
+  assert.match(source["Code.gs"], /role:\s*"user"[\s\S]*user_id:[\s\S]*session_version:/);
+  assert.match(source["Code.gs"], /findAccessUserById_\(session\.user_id\)/);
+  assert.match(source["Code.gs"], /!currentUser\.active/);
+  assert.match(source["Code.gs"], /currentUser\.session_version[\s\S]*session\.session_version/);
+  const mutationBlock = source["Code.gs"].match(/function withMutation_[\s\S]*?\n}\n\nfunction inferCount_/)?.[0] || "";
+  assert.match(mutationBlock, /tryLock\(28000\)[\s\S]*requireSession_\(request\.user_session, "user", false\)/);
+  assert.match(mutationBlock, /requireSession_\(request\.admin_session, "admin", false\)/);
+});
+
+test("세션 복원 bootstrap과 로그인 응답에 current_user가 포함된다", () => {
+  assert.match(source["Code.gs"], /case "get_bootstrap": return bootstrapForUser_\(false, userSession\)/);
+  assert.match(source["Code.gs"], /case "get_admin_bootstrap": return bootstrapForUser_\(true, userSession\)/);
+  assert.match(source["Code.gs"], /bootstrapForCurrentUser_\(teacherBootstrap_\(\), currentUser\)/);
+  assert.match(source["Code.gs"], /bootstrapForCurrentUser_\(adminBootstrap_\(\), currentUser\)/);
 });
 
 test("계획한 11개 시트 이름과 감사로그 비식별 필드를 포함한다", () => {
   for (const name of ["사용설명서", "설정", "학급", "학생", "고사일", "시간표", "선택과목", "결시", "입력완료", "자리배치", "감사로그"]) {
     assert.ok(all.includes(`"${name}"`), name);
   }
-  assert.match(source["Config.gs"], /\["id", "occurred_at", "role", "action", "target_type", "target_id", "count", "success", "detail"\]/);
+  assert.match(source["Config.gs"], /\["id", "occurred_at", "role", "actor_id", "action", "target_type", "target_id", "count", "success", "detail"\]/);
+  assert.match(source["Repository.gs"], /headers\.map\(\(header\).*record\[header\]/);
 });
 
 test("배포용 원본 통합문서가 포함되어 있다", () => {
@@ -66,7 +364,7 @@ test("배포용 원본 통합문서가 포함되어 있다", () => {
 test("기존 시트에 revision·seat_order 열과 schema_version을 안전하게 추가한다", () => {
   assert.match(source["Config.gs"], /\[SHEETS\.COMPLETIONS\]:\s*\[[^\]]*"revision"/s);
   assert.match(source["Config.gs"], /\[SHEETS\.SEATING\]:\s*\[[^\]]*"seat_order"/s);
-  assert.match(source["Config.gs"], /SCHEMA_VERSION:\s*"3"/);
+  assert.match(source["Config.gs"], /SCHEMA_VERSION:\s*"4"/);
   assert.match(source["Repository.gs"], /requiredHeaders\.filter\(\(header\) => existing\.indexOf\(header\) === -1\)/);
   assert.match(source["Repository.gs"], /setSetting_\("schema_version", APP\.SCHEMA_VERSION\)/);
 });
@@ -133,16 +431,21 @@ test("설정 데이터 캐시, 관리자 세션 버전, 로그인 제한이 적�
   assert.match(source["Code.gs"], /LOGIN_RATE_MAX_ATTEMPTS/);
   assert.match(source["Code.gs"], /LOGIN_RATE_GLOBAL_MAX_ATTEMPTS/);
   assert.match(source["Code.gs"], /LOGIN_RATE_LIMIT/);
-  assert.match(source["Code.gs"], /function recordLoginFailure_[\s\S]*LockService\.getScriptLock\(\)/);
+  for (const name of ["assertLoginAllowed_", "recordLoginFailure_", "clearLoginFailures_"]) {
+    const block = source["Code.gs"].match(new RegExp(`function ${name}[\\s\\S]*?\\n}`))?.[0] || "";
+    assert.match(block, /LockService\.getScriptLock\(\)/);
+    assert.match(block, /tryLock\(5000\)/);
+    assert.match(block, /finally[\s\S]*lock\.releaseLock\(\)/);
+  }
 });
 
 test("접속 상태 heartbeat는 인증 세션을 짧은 캐시에만 집계한다", () => {
   assert.match(source["Config.gs"], /PRESENCE_WINDOW_SECONDS:\s*90/);
   assert.match(source["Config.gs"], /PRESENCE_MAX_ENTRIES:\s*250/);
-  assert.match(source["Code.gs"], /action === "presence_ping"[\s\S]*requireSession_\(request\.school_session,\s*"teacher"/);
+  assert.match(source["Code.gs"], /action === "presence_ping"[\s\S]*requireSession_\(request\.user_session,\s*"user"/);
   assert.match(source["Code.gs"], /request\.user_active === true/);
   assert.match(source["Code.gs"], /request\.action !== "presence_ping"/);
-  assert.match(source["Code.gs"], /leavePresence_\(request\.school_session\)/);
+  assert.match(source["Code.gs"], /leavePresence_\(request\.user_session\)/);
   assert.match(source["Code.gs"], /function requireSession_\(token,\s*role,\s*touch\)/);
 
   const mutationBlock = source["Config.gs"].match(/const MUTATION_ACTIONS[\s\S]*?\]\);/)?.[0] || "";
@@ -302,11 +605,23 @@ test("가정통신문 설정은 표준 형태와 모든 길이·날짜 제한을
   assert.throws(() => helpers.normalizeExamNoticeInput_({ ...base, issuer: "가".repeat(101) }), { code: "INVALID_NOTICE_ISSUER" });
 });
 
-test("새 설정은 시트 열 추가 없이 설정 JSON으로 저장된다", () => {
-  assert.match(source["Config.gs"], /VERSION:\s*"2\.3\.0"/);
-  assert.match(source["Config.gs"], /SCHEMA_VERSION:\s*"3"/);
+test("새 설정은 시트 추가 없이 설정 JSON으로 저장된다", () => {
+  assert.match(source["Config.gs"], /VERSION:\s*"3\.0\.0"/);
+  assert.match(source["Config.gs"], /SCHEMA_VERSION:\s*"4"/);
   assert.match(source["Config.gs"], /\[SHEETS\.SETTINGS\]: \["key", "value", "updated_at"\]/);
   assert.equal((source["Config.gs"].match(/\[SHEETS\.[A-Z_]+\]: \[/g) || []).length, 10);
   assert.match(source["Repository.gs"], /setSetting_\("version", APP\.VERSION\)/);
   assert.match(source["Repository.gs"], /function setSetting_[\s\S]*replaceRecords_\(SHEETS\.SETTINGS, rows\)/);
+});
+
+test("초기 설정과 스키마 마이그레이션이 새 시스템 이름과 인증 구조를 적용한다", () => {
+  assert.match(source["Config.gs"], /SYSTEM_NAME:\s*"한양대학교사범대학부속고등학교 통합 시스템"/);
+  const initBlock = source["Code.gs"].match(/function initializeExamSystem[\s\S]*?\n}\n\nfunction changeAdminPassword/)?.[0] || "";
+  assert.match(initBlock, /schoolNamePrompt/);
+  assert.match(initBlock, /passwordPrompt/);
+  assert.doesNotMatch(initBlock, /schoolCodePrompt|request\.school_code/);
+  assert.match(initBlock, /setSetting_\("app_name", APP\.SYSTEM_NAME\)/);
+  assert.match(source["Repository.gs"], /oldGuideRange\.breakApart\(\)[\s\S]*oldGuideRange\.clearContent\(\)/);
+  assert.match(source["Repository.gs"], /PROPERTY_ACCESS_USER_PEPPER/);
+  assert.match(source["Repository.gs"], /\["SCHOOL", "CODE", "SALT"\]\.join\("_"\)/);
 });

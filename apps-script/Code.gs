@@ -14,37 +14,35 @@ function initializeExamSystem() {
   ensureSheets_();
   const schoolNamePrompt = ui.prompt("초기 설정", "학교명을 입력하세요.", ui.ButtonSet.OK_CANCEL);
   if (schoolNamePrompt.getSelectedButton() !== ui.Button.OK) return;
-  const schoolCodePrompt = ui.prompt("초기 설정", "학교코드를 입력하세요. 원문은 저장되지 않습니다.", ui.ButtonSet.OK_CANCEL);
-  if (schoolCodePrompt.getSelectedButton() !== ui.Button.OK) return;
   const passwordPrompt = ui.prompt("초기 설정", "관리자 암호를 입력하세요. 10자 이상을 권장합니다.", ui.ButtonSet.OK_CANCEL);
   if (passwordPrompt.getSelectedButton() !== ui.Button.OK) return;
 
   const schoolName = String(schoolNamePrompt.getResponseText() || "").trim();
-  const schoolCode = String(schoolCodePrompt.getResponseText() || "").trim();
   const password = String(passwordPrompt.getResponseText() || "");
-  if (!schoolName || !schoolCode || password.length < 8) {
-    ui.alert("학교명과 학교코드를 입력하고 관리자 암호를 8자 이상으로 설정하세요.");
+  if (!schoolName || password.length < 8) {
+    ui.alert("학교명을 입력하고 관리자 암호를 8자 이상으로 설정하세요.");
     return;
   }
 
   const properties = PropertiesService.getScriptProperties();
-  const schoolSalt = randomToken_();
   const passwordSalt = randomToken_();
+  const nextAdminVersion = Number(properties.getProperty(APP.PROPERTY_ADMIN_SESSION_VERSION) || 0) + 1;
   properties.setProperties({
     [APP.PROPERTY_SHEET_ID]: SpreadsheetApp.getActiveSpreadsheet().getId(),
-    [APP.PROPERTY_SCHOOL_SALT]: schoolSalt,
-    [APP.PROPERTY_SCHOOL_HASH]: hashSecret_(schoolCode, schoolSalt),
+    [APP.PROPERTY_ACCESS_USER_PEPPER]: properties.getProperty(APP.PROPERTY_ACCESS_USER_PEPPER) || randomToken_() + randomToken_(),
     [APP.PROPERTY_ADMIN_SALT]: passwordSalt,
     [APP.PROPERTY_ADMIN_HASH]: hashSecret_(password, passwordSalt),
-    [APP.PROPERTY_ADMIN_SESSION_VERSION]: "1",
+    [APP.PROPERTY_ADMIN_SESSION_VERSION]: String(nextAdminVersion),
   }, false);
+  properties.deleteProperty(["SCHOOL", "CODE", "SALT"].join("_"));
+  properties.deleteProperty(["SCHOOL", "CODE", "HASH"].join("_"));
 
   setSetting_("school_name", schoolName);
-  setSetting_("app_name", "정기고사 관리 시스템");
+  setSetting_("app_name", APP.SYSTEM_NAME);
   setSetting_("timezone", APP.TIMEZONE);
   setSetting_("version", APP.VERSION);
   setSetting_("schema_version", APP.SCHEMA_VERSION);
-  safeAppendAudit_("admin", "initialize", "system", "", 1, true, "OK");
+  safeAppendAudit_("admin", "initialize", "system", "", 1, true, "OK", "system_admin");
   ui.alert("초기 설정을 마쳤습니다. 이제 Apps Script를 웹 앱으로 배포하세요.");
 }
 
@@ -67,7 +65,7 @@ function changeAdminPassword() {
   properties.setProperty(APP.PROPERTY_ADMIN_SALT, salt);
   properties.setProperty(APP.PROPERTY_ADMIN_HASH, hashSecret_(password, salt));
   properties.setProperty(APP.PROPERTY_ADMIN_SESSION_VERSION, String(nextVersion));
-  safeAppendAudit_("admin", "change_password", "system", "", 1, true, "OK");
+  safeAppendAudit_("admin", "change_password", "system", "", 1, true, "OK", "system_admin");
   ui.alert("관리자 암호를 바꿨습니다. 기존 관리자 세션은 모두 만료됩니다.");
 }
 
@@ -129,28 +127,34 @@ function ensureSchemaOnRequest_() {
 function dispatch_(request) {
   const action = String(request.action || "");
   if (!action) throw apiError_("INVALID_ACTION", "작업 이름이 없습니다.");
-  if (action === "school_login") return schoolLogin_(request);
+  if (action === "user_login") return userLogin_(request);
+  if (action === "admin_entry_login") return adminEntryLogin_(request);
   if (action === "logout") return logout_(request);
 
   if (action === "presence_ping") {
-    requireSession_(request.school_session, "teacher", request.user_active === true);
+    requireSession_(request.user_session, "user", request.user_active === true);
     return presencePing_(request);
   }
 
-  const teacher = requireSession_(request.school_session, "teacher");
-  if (action === "admin_login") return adminLogin_(request, teacher);
-  if (ADMIN_ACTIONS.has(action)) requireSession_(request.admin_session, "admin");
+  const user = requireSession_(request.user_session, "user");
+  if (action === "admin_login") return adminLogin_(request, user);
+  if (ADMIN_ACTIONS.has(action)) {
+    const admin = requireSession_(request.admin_session, "admin");
+    if (String(admin.actor_id || "") !== String(user.user_id || "")) {
+      throw apiError_("FORBIDDEN", "관리자 세션과 사용자 세션이 일치하지 않습니다.");
+    }
+  }
 
   if (MUTATION_ACTIONS.has(action)) {
-    return withMutation_(request, ADMIN_ACTIONS.has(action) ? "admin" : "teacher", () => route_(action, request));
+    return withMutation_(request, ADMIN_ACTIONS.has(action) ? "admin" : "user", user.user_id, () => route_(action, request));
   }
-  return route_(action, request);
+  return route_(action, request, user);
 }
 
-function route_(action, request) {
+function route_(action, request, userSession) {
   switch (action) {
-    case "get_bootstrap": return teacherBootstrap_();
-    case "get_admin_bootstrap": return adminBootstrap_();
+    case "get_bootstrap": return bootstrapForUser_(false, userSession);
+    case "get_admin_bootstrap": return bootstrapForUser_(true, userSession);
     case "get_absence_context": return getAbsenceContext_(request);
     case "submit_absence_input": return submitAbsenceInput_(request);
     case "get_hq_status": return getHqStatus_(request);
@@ -167,6 +171,9 @@ function route_(action, request) {
     case "delete_timetable": return deleteTimetable_(request);
     case "save_subject_catalog": return saveSubjectCatalog_(request);
     case "save_exam_notice_settings": return saveExamNoticeSettings_(request);
+    case "save_access_user": return saveAccessUser_(request);
+    case "set_access_user_active": return setAccessUserActive_(request);
+    case "reset_access_user_pin": return resetAccessUserPin_(request);
     case "save_enrollments": return saveEnrollments_(request);
     case "save_seat_chart": return saveSeatChart_(request);
     case "save_seat_charts_batch": return saveSeatChartsBatch_(request);
@@ -176,26 +183,28 @@ function route_(action, request) {
   }
 }
 
-function schoolLogin_(request) {
-  const secret = String(request.school_code || "").trim();
-  const rateKeys = loginRateKeys_("school", request);
+function userLogin_(request) {
+  const loginName = canonicalLoginName_(request.login_name).slice(0, 100);
+  const pin = String(request.pin || "").trim();
+  const rateKeys = loginRateKeys_("user", request, loginName);
   assertLoginAllowed_(rateKeys);
-  const properties = PropertiesService.getScriptProperties();
-  const salt = properties.getProperty(APP.PROPERTY_SCHOOL_SALT);
-  const expected = properties.getProperty(APP.PROPERTY_SCHOOL_HASH);
-  if (!salt || !expected) throw loggedApiError_("teacher", "school_login", "NOT_INITIALIZED", "학교 시트에서 초기 설정을 먼저 실행하세요.");
-  const actual = hashSecret_(secret, salt);
-  if (!constantTimeEqual_(actual, expected)) {
+  const user = loginName && /^\d{6}$/.test(pin) ? findAccessUserByLogin_(loginName) : null;
+  const comparisonSalt = user ? user.pin_salt : "invalid-login-salt";
+  const expectedHash = user ? user.pin_hash : "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+  const actualHash = hashAccessPin_(pin, comparisonSalt);
+  const valid = Boolean(user && user.active && constantTimeEqual_(actualHash, expectedHash));
+  if (!valid) {
     recordLoginFailure_(rateKeys);
-    throw loggedApiError_("teacher", "school_login", "INVALID_SCHOOL_CODE", "학교코드가 올바르지 않습니다.");
+    throw loggedApiError_("user", "user_login", "INVALID_LOGIN", "접속 이름 또는 개인 PIN이 올바르지 않습니다.");
   }
   clearLoginFailures_(rateKeys);
-  const token = createSession_("teacher");
-  safeAppendAudit_("teacher", "school_login", "session", "", 1, true, "OK");
-  return { session: token, bootstrap: teacherBootstrap_() };
+  const token = createUserSession_(user);
+  const currentUser = safeAccessUser_(user);
+  safeAppendAudit_("user", "user_login", "session", "", 1, true, "OK", user.id);
+  return { user_session: token, current_user: currentUser, bootstrap: bootstrapForCurrentUser_(teacherBootstrap_(), currentUser) };
 }
 
-function adminLogin_(request) {
+function verifyAdminPassword_(request, action) {
   const password = String(request.password || "");
   const rateKeys = loginRateKeys_("admin", request);
   assertLoginAllowed_(rateKeys);
@@ -205,24 +214,59 @@ function adminLogin_(request) {
   const actual = hashSecret_(password, salt || "");
   if (!salt || !expected || !constantTimeEqual_(actual, expected)) {
     recordLoginFailure_(rateKeys);
-    throw loggedApiError_("admin", "admin_login", "INVALID_ADMIN_PASSWORD", "관리자 암호가 올바르지 않습니다.");
+    throw loggedApiError_("admin", action, "INVALID_ADMIN_PASSWORD", "관리자 암호가 올바르지 않습니다.");
   }
   clearLoginFailures_(rateKeys);
-  const token = createSession_("admin");
-  safeAppendAudit_("admin", "admin_login", "session", "", 1, true, "OK");
-  return { admin_session: token, bootstrap: adminBootstrap_() };
+}
+
+function adminEntryLogin_(request) {
+  verifyAdminPassword_(request, "admin_entry_login");
+  const currentUser = { id: "system_admin", login_name: "관리자", active: true, system: true };
+  const userToken = createUserSession_(currentUser, true);
+  const adminToken = createAdminSession_(currentUser.id);
+  safeAppendAudit_("admin", "admin_entry_login", "session", "", 1, true, "OK", currentUser.id);
+  return {
+    user_session: userToken,
+    admin_session: adminToken,
+    current_user: currentUser,
+    bootstrap: bootstrapForCurrentUser_(adminBootstrap_(), currentUser),
+  };
+}
+
+function adminLogin_(request, userSession) {
+  verifyAdminPassword_(request, "admin_login");
+  const token = createAdminSession_(userSession.user_id);
+  safeAppendAudit_("admin", "admin_login", "session", "", 1, true, "OK", userSession.user_id);
+  return { admin_session: token, bootstrap: bootstrapForUser_(true, userSession) };
+}
+
+function currentUserFromSession_(session) {
+  if (session && session.system_admin === true && session.user_id === "system_admin") {
+    return { id: "system_admin", login_name: "관리자", active: true, system: true };
+  }
+  const user = session ? findAccessUserById_(session.user_id) : null;
+  if (!user || !user.active) throw apiError_("SESSION_EXPIRED", "접속 권한이 변경되었습니다. 다시 로그인하세요.");
+  return safeAccessUser_(user);
+}
+
+function bootstrapForCurrentUser_(bootstrap, currentUser) {
+  return Object.assign({}, bootstrap, { current_user: currentUser });
+}
+
+function bootstrapForUser_(admin, session) {
+  return bootstrapForCurrentUser_(admin ? adminBootstrap_() : teacherBootstrap_(), currentUserFromSession_(session));
 }
 
 function logout_(request) {
   const cache = CacheService.getScriptCache();
-  leavePresence_(request.school_session);
-  if (request.school_session) cache.remove("session:" + request.school_session);
+  leavePresence_(request.user_session);
+  if (request.user_session) cache.remove("session:" + request.user_session);
   if (request.admin_session) cache.remove("session:" + request.admin_session);
   return { logged_out: true };
 }
 
-function presenceIdentity_(schoolSession) {
-  const token = String(schoolSession || "").trim();
+function presenceIdentity_(userSession) {
+  const token = String(userSession || "").trim();
   if (!token) return "";
   return hashSecret_(token, "presence-v1").slice(0, 43);
 }
@@ -263,7 +307,7 @@ function presenceResponse_(registry, ownIdentity, stale) {
 }
 
 function presencePing_(request) {
-  const ownIdentity = presenceIdentity_(request.school_session);
+  const ownIdentity = presenceIdentity_(request.user_session);
   if (!ownIdentity) throw apiError_("SESSION_REQUIRED", "로그인이 필요합니다.");
   const cache = CacheService.getScriptCache();
   const nowMs = Date.now();
@@ -282,8 +326,8 @@ function presencePing_(request) {
   }
 }
 
-function leavePresence_(schoolSession) {
-  const ownIdentity = presenceIdentity_(schoolSession);
+function leavePresence_(userSession) {
+  const ownIdentity = presenceIdentity_(userSession);
   if (!ownIdentity) return;
   const cache = CacheService.getScriptCache();
   const lock = LockService.getScriptLock();
@@ -1108,6 +1152,108 @@ function saveExamNoticeSettings_(request) {
   return adminBootstrap_();
 }
 
+function canonicalLoginName_(value) {
+  let name = String(value == null ? "" : value);
+  if (typeof name.normalize === "function") name = name.normalize("NFKC");
+  return name.replace(/\s+/g, " ").trim();
+}
+
+function loginLookupKey_(value) {
+  return canonicalLoginName_(value).toLowerCase();
+}
+
+function validateLoginName_(value) {
+  const name = canonicalLoginName_(value);
+  if (!name || name.length > 50 || /[\u0000-\u001f\u007f]/.test(name)) {
+    throw apiError_("INVALID_LOGIN_NAME", "접속 이름은 1자 이상 50자 이하로 입력하세요.");
+  }
+  return name;
+}
+
+function validatePin_(value) {
+  const pin = String(value == null ? "" : value).trim();
+  if (!/^\d{6}$/.test(pin)) throw apiError_("INVALID_PIN", "개인 PIN은 숫자 6자리로 입력하세요.");
+  return pin;
+}
+
+function hashAccessPin_(pin, salt) {
+  const pepper = PropertiesService.getScriptProperties().getProperty(APP.PROPERTY_ACCESS_USER_PEPPER);
+  if (!pepper) throw apiError_("NOT_INITIALIZED", "초기 설정을 다시 실행하세요.");
+  return hashSecret_(String(pin) + "\u001f" + pepper, salt);
+}
+
+function createAccessUserId_() {
+  return Utilities.getUuid();
+}
+
+function assertUniqueLoginName_(users, loginName, exceptId) {
+  const lookup = loginLookupKey_(loginName);
+  if (users.some((item) => item.id !== exceptId && item.normalized_login_name === lookup)) {
+    throw apiError_("DUPLICATE_LOGIN_NAME", "이미 등록된 접속 이름입니다.");
+  }
+}
+
+function saveAccessUser_(request) {
+  const loginName = validateLoginName_(request.login_name);
+  const users = getAccessUsers_();
+  const id = String(request.id || "").trim();
+  const existing = id ? users.find((item) => item.id === id) : null;
+  if (id && !existing) throw apiError_("ACCESS_USER_NOT_FOUND", "접속 사용자를 찾지 못했습니다.");
+  if (!existing && users.length >= 300) throw apiError_("TOO_MANY_ACCESS_USERS", "접속 사용자는 300명까지 등록할 수 있습니다.");
+  assertUniqueLoginName_(users, loginName, existing ? existing.id : "");
+
+  const now = nowIso_();
+  let user = existing ? Object.assign({}, existing) : {
+    id: createAccessUserId_(),
+    active: true,
+    session_version: 1,
+    created_at: now,
+  };
+  const nameChanged = Boolean(existing && existing.login_name !== loginName);
+  user.login_name = loginName;
+  user.normalized_login_name = loginLookupKey_(loginName);
+  user.updated_at = now;
+
+  const pinProvided = request.pin != null && String(request.pin).trim() !== "";
+  if (!existing || pinProvided) {
+    const pin = validatePin_(request.pin);
+    user.pin_salt = randomToken_();
+    user.pin_hash = hashAccessPin_(pin, user.pin_salt);
+  }
+  if (existing && (nameChanged || pinProvided)) user.session_version += 1;
+  writeAccessUser_(user);
+  return adminBootstrap_();
+}
+
+function setAccessUserActive_(request) {
+  validateRequired_(request, ["id"]);
+  if (request.active !== true && request.active !== false) {
+    throw apiError_("INVALID_ACTIVE_STATE", "활성 상태를 확인하세요.");
+  }
+  const user = findAccessUserById_(request.id);
+  if (!user) throw apiError_("ACCESS_USER_NOT_FOUND", "접속 사용자를 찾지 못했습니다.");
+  if (user.active !== request.active) {
+    user.active = request.active;
+    user.session_version += 1;
+    user.updated_at = nowIso_();
+    writeAccessUser_(user);
+  }
+  return adminBootstrap_();
+}
+
+function resetAccessUserPin_(request) {
+  validateRequired_(request, ["id"]);
+  const pin = validatePin_(request.pin);
+  const user = findAccessUserById_(request.id);
+  if (!user) throw apiError_("ACCESS_USER_NOT_FOUND", "접속 사용자를 찾지 못했습니다.");
+  user.pin_salt = randomToken_();
+  user.pin_hash = hashAccessPin_(pin, user.pin_salt);
+  user.session_version += 1;
+  user.updated_at = nowIso_();
+  writeAccessUser_(user);
+  return adminBootstrap_();
+}
+
 function timetableDeleteImpact_(target, timetable) {
   const remainingSubjectRows = timetable.filter((item) =>
     String(item.id) !== String(target.id) &&
@@ -1454,9 +1600,9 @@ function cleanup_(request) {
   return adminBootstrap_();
 }
 
-function safeAppendAudit_(role, action, targetType, targetId, count, success, detail) {
+function safeAppendAudit_(role, action, targetType, targetId, count, success, detail, actorId) {
   try {
-    appendAudit_(role, action, targetType, targetId, count, success, detail);
+    appendAudit_(role, action, targetType, targetId, count, success, detail, actorId);
   } catch (error) {
     console.error("AUDIT_WRITE_FAILED", action, success ? "success" : "failure");
   }
@@ -1495,25 +1641,35 @@ function writeMutationCache_(cache, key, result) {
   }
 }
 
-function withMutation_(request, role, operation) {
+function withMutation_(request, role, actorId, operation) {
   const requestId = String(request.request_id || "");
   if (!requestId) throw apiError_("REQUEST_ID_REQUIRED", "저장 요청 식별자가 없습니다. 화면을 새로고침한 뒤 다시 시도하세요.");
   const cache = CacheService.getScriptCache();
-  const idempotencyKey = ["request", role, request.action, requestId].join(":");
+  const idempotencyKey = ["request", role, String(actorId || "unknown"), request.action, requestId].join(":");
   const cached = readMutationCache_(cache, idempotencyKey, request, role);
   if (cached) return cached;
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(28000)) throw apiError_("BUSY", "동시 저장 요청이 많습니다. 잠시 후 다시 시도하세요.");
   try {
+    const currentUserSession = requireSession_(request.user_session, "user", false);
+    if (String(currentUserSession.user_id || "") !== String(actorId || "")) {
+      throw apiError_("FORBIDDEN", "사용자 세션이 일치하지 않습니다.");
+    }
+    if (role === "admin") {
+      const currentAdminSession = requireSession_(request.admin_session, "admin", false);
+      if (String(currentAdminSession.actor_id || "") !== String(actorId || "")) {
+        throw apiError_("FORBIDDEN", "관리자 세션과 사용자 세션이 일치하지 않습니다.");
+      }
+    }
     const cachedAfterLock = readMutationCache_(cache, idempotencyKey, request, role);
     if (cachedAfterLock) return cachedAfterLock;
     const result = operation();
     writeMutationCache_(cache, idempotencyKey, result);
-    safeAppendAudit_(role, request.action, "records", "", inferCount_(request), true, "OK");
+    safeAppendAudit_(role, request.action, "records", "", inferCount_(request), true, "OK", actorId);
     return result;
   } catch (error) {
     if (!error.auditLogged) {
-      safeAppendAudit_(role, request.action, "records", "", 0, false, error.code || "REQUEST_FAILED");
+      safeAppendAudit_(role, request.action, "records", "", 0, false, error.code || "REQUEST_FAILED", actorId);
       error.auditLogged = true;
     }
     throw error;
@@ -1533,14 +1689,32 @@ function inferCount_(request) {
   return 1;
 }
 
-function createSession_(role) {
+function createUserSession_(user, systemAdmin) {
   const token = randomToken_() + randomToken_();
-  const ttl = role === "admin" ? APP.ADMIN_TTL_SECONDS : APP.TEACHER_TTL_SECONDS;
-  const session = { role: role, created_at: nowIso_() };
-  if (role === "admin") {
+  const session = {
+    role: "user",
+    user_id: String(user.id),
+    login_name: String(user.login_name),
+    session_version: Number(user.session_version) || 1,
+    system_admin: systemAdmin === true,
+    created_at: nowIso_(),
+  };
+  if (session.system_admin) {
     session.session_version = Number(PropertiesService.getScriptProperties().getProperty(APP.PROPERTY_ADMIN_SESSION_VERSION) || 1);
   }
-  CacheService.getScriptCache().put("session:" + token, JSON.stringify(session), ttl);
+  CacheService.getScriptCache().put("session:" + token, JSON.stringify(session), APP.USER_TTL_SECONDS);
+  return token;
+}
+
+function createAdminSession_(actorId) {
+  const token = randomToken_() + randomToken_();
+  const session = {
+    role: "admin",
+    actor_id: String(actorId || ""),
+    session_version: Number(PropertiesService.getScriptProperties().getProperty(APP.PROPERTY_ADMIN_SESSION_VERSION) || 1),
+    created_at: nowIso_(),
+  };
+  CacheService.getScriptCache().put("session:" + token, JSON.stringify(session), APP.ADMIN_TTL_SECONDS);
   return token;
 }
 
@@ -1554,49 +1728,259 @@ function requireSession_(token, role, touch) {
       ? apiError_("ADMIN_SESSION_EXPIRED", "관리자 세션이 만료되었습니다. 관리자 암호를 다시 입력하세요.")
       : apiError_("SESSION_EXPIRED", "세션이 만료되었습니다. 다시 로그인하세요.");
   }
-  const session = JSON.parse(raw);
-  if (session.role !== role) throw apiError_("FORBIDDEN", "이 작업에 필요한 권한이 없습니다.");
+  let session;
+  try {
+    session = JSON.parse(raw);
+  } catch (ignored) {
+    cache.remove(key);
+    throw role === "admin"
+      ? apiError_("ADMIN_SESSION_EXPIRED", "관리자 세션이 만료되었습니다. 관리자 암호를 다시 입력하세요.")
+      : apiError_("SESSION_EXPIRED", "세션이 만료되었습니다. 다시 로그인하세요.");
+  }
+  if (session.role !== role) {
+    cache.remove(key);
+    if (role === "user") throw apiError_("SESSION_EXPIRED", "이전 로그인 세션이 만료되었습니다. 다시 로그인하세요.");
+    throw apiError_("FORBIDDEN", "이 작업에 필요한 권한이 없습니다.");
+  }
   if (role === "admin") {
     const currentVersion = Number(PropertiesService.getScriptProperties().getProperty(APP.PROPERTY_ADMIN_SESSION_VERSION) || 1);
     if (Number(session.session_version) !== currentVersion) {
       cache.remove(key);
       throw apiError_("ADMIN_SESSION_EXPIRED", "관리자 암호가 변경되어 관리자 세션이 만료되었습니다.");
     }
+  } else if (role === "user") {
+    if (!session.user_id) {
+      cache.remove(key);
+      throw apiError_("SESSION_EXPIRED", "이전 로그인 세션이 만료되었습니다. 다시 로그인하세요.");
+    }
+    if (session.system_admin === true) {
+      const adminVersion = Number(PropertiesService.getScriptProperties().getProperty(APP.PROPERTY_ADMIN_SESSION_VERSION) || 1);
+      if (session.user_id !== "system_admin" || Number(session.session_version) !== adminVersion) {
+        cache.remove(key);
+        throw apiError_("SESSION_EXPIRED", "관리자 설정 세션이 만료되었습니다. 다시 로그인하세요.");
+      }
+    } else {
+      const currentUser = findAccessUserById_(session.user_id);
+      if (!currentUser || !currentUser.active || Number(currentUser.session_version) !== Number(session.session_version)) {
+        cache.remove(key);
+        throw apiError_("SESSION_EXPIRED", "접속 권한이 변경되어 세션이 만료되었습니다. 다시 로그인하세요.");
+      }
+    }
   }
   if (touch !== false) {
-    const ttl = role === "admin" ? APP.ADMIN_TTL_SECONDS : APP.TEACHER_TTL_SECONDS;
+    const ttl = role === "admin" ? APP.ADMIN_TTL_SECONDS : APP.USER_TTL_SECONDS;
     cache.put(key, raw, ttl);
   }
   return session;
 }
 
-function loginRateKeys_(scope, request) {
+function loginRateKeys_(scope, request, loginName) {
   const identity = String(request.client_id || request.client_key || "").trim() || "anonymous";
-  return [
-    { key: "login-rate:" + scope + ":client:" + identity.slice(0, 80), max: APP.LOGIN_RATE_MAX_ATTEMPTS },
-    { key: "login-rate:" + scope + ":global", max: APP.LOGIN_RATE_GLOBAL_MAX_ATTEMPTS },
+  const keys = [
+    {
+      key: "login-rate:" + scope + ":client:" + hashSecret_(identity.slice(0, 200), "login-client-rate-v1").slice(0, 32),
+      max: APP.LOGIN_RATE_MAX_ATTEMPTS,
+      clear_on_success: true,
+    },
   ];
+  const nameKey = loginLookupKey_(loginName || "");
+  if (nameKey) {
+    keys.push({
+      key: "login-rate:" + scope + ":name:" + hashSecret_(nameKey, "login-name-rate-v1").slice(0, 32),
+      max: APP.LOGIN_RATE_MAX_ATTEMPTS,
+      clear_on_success: true,
+    });
+  }
+  keys.push({ key: "login-rate:" + scope + ":global", max: APP.LOGIN_RATE_GLOBAL_MAX_ATTEMPTS, clear_on_success: false });
+  return keys;
+}
+
+function nowMillis_() {
+  return Date.now();
+}
+
+function loginRateStorageKey_(cacheKey) {
+  return hashSecret_(String(cacheKey || ""), "login-rate-property-v1").slice(0, 32);
+}
+
+function loginRatePropertyName_(index) {
+  return APP.PROPERTY_LOGIN_RATE_STATE_PREFIX + String(index);
+}
+
+function normalizeLoginRateEntry_(value, nowMs) {
+  const data = Array.isArray(value)
+    ? { count: value[0], expires_at: value[1], updated_at: value[2] }
+    : value;
+  if (!data || typeof data !== "object") return null;
+  const count = Number(data.count);
+  const expiresAt = Number(data.expires_at);
+  const updatedAt = Number(data.updated_at);
+  if (!Number.isInteger(count) || count < 1 || count > 100000) return null;
+  if (!Number.isFinite(expiresAt) || expiresAt <= nowMs) return null;
+  if (!Number.isFinite(updatedAt) || updatedAt < 0) return null;
+  return { count: count, expires_at: expiresAt, updated_at: updatedAt };
+}
+
+function pruneLoginRateEntries_(entries, nowMs) {
+  return Object.fromEntries(
+    Object.entries(entries || {})
+      .map((item) => [item[0], normalizeLoginRateEntry_(item[1], nowMs)])
+      .filter((item) => /^[A-Za-z0-9_-]{32}$/.test(item[0]) && item[1])
+      .sort((left, right) => right[1].updated_at - left[1].updated_at)
+      .slice(0, APP.LOGIN_RATE_MAX_ENTRIES)
+  );
+}
+
+function readLoginRateState_(nowMs) {
+  const properties = PropertiesService.getScriptProperties();
+  const allProperties = properties.getProperties();
+  const entries = {};
+  let changed = false;
+  for (let index = 0; index < APP.LOGIN_RATE_STATE_SHARDS; index += 1) {
+    const raw = allProperties[loginRatePropertyName_(index)];
+    if (!raw) continue;
+    let shard;
+    try {
+      shard = JSON.parse(raw);
+    } catch (ignored) {
+      changed = true;
+      continue;
+    }
+    if (!shard || Array.isArray(shard) || typeof shard !== "object") {
+      changed = true;
+      continue;
+    }
+    Object.entries(shard).forEach((item) => {
+      const key = String(item[0] || "");
+      const normalized = normalizeLoginRateEntry_(item[1], nowMs);
+      if (!/^[A-Za-z0-9_-]{32}$/.test(key) || !normalized) {
+        changed = true;
+        return;
+      }
+      if (entries[key]) {
+        changed = true;
+        entries[key] = {
+          count: Math.max(entries[key].count, normalized.count),
+          expires_at: Math.max(entries[key].expires_at, normalized.expires_at),
+          updated_at: Math.max(entries[key].updated_at, normalized.updated_at),
+        };
+      } else {
+        entries[key] = normalized;
+      }
+    });
+  }
+  const pruned = pruneLoginRateEntries_(entries, nowMs);
+  if (Object.keys(pruned).length !== Object.keys(entries).length) changed = true;
+  return { entries: pruned, changed: changed };
+}
+
+function writeLoginRateState_(entries, nowMs) {
+  const pruned = pruneLoginRateEntries_(entries, nowMs);
+  const shards = Array.from({ length: APP.LOGIN_RATE_STATE_SHARDS }, () => ({}));
+  Object.entries(pruned).forEach((item, index) => {
+    const entry = item[1];
+    shards[index % APP.LOGIN_RATE_STATE_SHARDS][item[0]] = [entry.count, entry.expires_at, entry.updated_at];
+  });
+  const payload = {};
+  shards.forEach((shard, index) => {
+    payload[loginRatePropertyName_(index)] = JSON.stringify(shard);
+  });
+  PropertiesService.getScriptProperties().setProperties(payload, false);
+  return pruned;
+}
+
+function readLoginRateCacheEntry_(cache, key, nowMs) {
+  let raw = "";
+  try {
+    raw = cache.get(key) || "";
+  } catch (ignored) {
+    return null;
+  }
+  if (!raw) return null;
+  let entry;
+  try {
+    const parsed = JSON.parse(raw);
+    entry = normalizeLoginRateEntry_(parsed, nowMs);
+  } catch (ignored) {
+    entry = null;
+  }
+  if (!entry) {
+    const legacyCount = Number(raw);
+    entry = Number.isInteger(legacyCount) && legacyCount > 0
+      ? { count: legacyCount, expires_at: nowMs + APP.LOGIN_RATE_TTL_SECONDS * 1000, updated_at: nowMs }
+      : null;
+  }
+  if (!entry) {
+    try { cache.remove(key); } catch (ignored) {}
+  }
+  return entry;
+}
+
+function writeLoginRateCacheEntry_(cache, key, entry, nowMs) {
+  const ttl = Math.max(1, Math.ceil((entry.expires_at - nowMs) / 1000));
+  try {
+    cache.put(key, JSON.stringify(entry), Math.min(APP.LOGIN_RATE_TTL_SECONDS, ttl));
+  } catch (ignored) {}
 }
 
 function assertLoginAllowed_(rateKeys) {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) throw apiError_("BUSY", "로그인 보안 상태를 확인하는 중입니다. 잠시 후 다시 시도하세요.");
   const cache = CacheService.getScriptCache();
-  rateKeys.forEach((item) => {
-    const attempts = Number(cache.get(item.key) || 0);
-    if (attempts >= item.max) {
-      throw apiError_("LOGIN_RATE_LIMIT", "로그인 시도가 너무 많습니다. 5분 뒤 다시 시도하세요.");
-    }
-  });
+  try {
+    const nowMs = nowMillis_();
+    const state = readLoginRateState_(nowMs);
+    let changed = state.changed;
+    let blocked = false;
+    rateKeys.forEach((item) => {
+      const storageKey = loginRateStorageKey_(item.key);
+      const cached = readLoginRateCacheEntry_(cache, item.key, nowMs);
+      const stored = state.entries[storageKey] || null;
+      if (cached) {
+        const merged = stored ? {
+          count: Math.max(stored.count, cached.count),
+          expires_at: Math.max(stored.expires_at, cached.expires_at),
+          updated_at: Math.max(stored.updated_at, cached.updated_at),
+        } : cached;
+        if (!stored || JSON.stringify(stored) !== JSON.stringify(merged)) {
+          state.entries[storageKey] = merged;
+          changed = true;
+        }
+      }
+      const effective = state.entries[storageKey] || null;
+      if (effective) {
+        writeLoginRateCacheEntry_(cache, item.key, effective, nowMs);
+        if (effective.count >= item.max) blocked = true;
+      }
+    });
+    if (changed) writeLoginRateState_(state.entries, nowMs);
+    if (blocked) throw apiError_("LOGIN_RATE_LIMIT", "로그인 시도가 너무 많습니다. 5분 뒤 다시 시도하세요.");
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function recordLoginFailure_(rateKeys) {
   const lock = LockService.getScriptLock();
-  if (!lock.tryLock(5000)) return;
+  if (!lock.tryLock(5000)) throw apiError_("BUSY", "로그인 보안 상태를 저장하는 중입니다. 잠시 후 다시 시도하세요.");
   const cache = CacheService.getScriptCache();
   try {
+    const nowMs = nowMillis_();
+    const state = readLoginRateState_(nowMs);
     rateKeys.forEach((item) => {
-      const attempts = Number(cache.get(item.key) || 0) + 1;
-      cache.put(item.key, String(attempts), APP.LOGIN_RATE_TTL_SECONDS);
+      const storageKey = loginRateStorageKey_(item.key);
+      const cached = readLoginRateCacheEntry_(cache, item.key, nowMs);
+      const stored = state.entries[storageKey] || null;
+      const attempts = Math.max(stored ? stored.count : 0, cached ? cached.count : 0) + 1;
+      const entry = {
+        count: attempts,
+        expires_at: nowMs + APP.LOGIN_RATE_TTL_SECONDS * 1000,
+        updated_at: nowMs,
+      };
+      state.entries[storageKey] = entry;
+      writeLoginRateCacheEntry_(cache, item.key, entry, nowMs);
     });
+    writeLoginRateState_(state.entries, nowMs);
   } finally {
     lock.releaseLock();
   }
@@ -1604,10 +1988,21 @@ function recordLoginFailure_(rateKeys) {
 
 function clearLoginFailures_(rateKeys) {
   const lock = LockService.getScriptLock();
-  if (!lock.tryLock(5000)) return;
+  if (!lock.tryLock(5000)) throw apiError_("BUSY", "로그인 보안 상태를 갱신하는 중입니다. 잠시 후 다시 시도하세요.");
   const cache = CacheService.getScriptCache();
   try {
-    rateKeys.forEach((item) => cache.remove(item.key));
+    const nowMs = nowMillis_();
+    const state = readLoginRateState_(nowMs);
+    let changed = state.changed;
+    rateKeys.filter((item) => item.clear_on_success !== false).forEach((item) => {
+      const storageKey = loginRateStorageKey_(item.key);
+      if (state.entries[storageKey]) {
+        delete state.entries[storageKey];
+        changed = true;
+      }
+      try { cache.remove(item.key); } catch (ignored) {}
+    });
+    if (changed) writeLoginRateState_(state.entries, nowMs);
   } finally {
     lock.releaseLock();
   }
