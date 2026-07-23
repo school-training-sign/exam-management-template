@@ -20,9 +20,9 @@ function ensureSheets_() {
     oldGuideRange.breakApart();
     oldGuideRange.clearContent();
     guide.getRange("A1:B8").setValues([
-      [APP.SYSTEM_NAME, "배포용 원본"],
+      [APP.SYSTEM_NAME, "학교 운영 시트"],
       ["1", "상단 메뉴 '정기고사 관리 > 초기 설정'을 실행합니다."],
-      ["2", "학교명과 관리자 암호를 입력합니다."],
+      ["2", "학교명과 4자 이상의 관리자 암호를 입력합니다."],
       ["3", "Apps Script를 웹 앱으로 배포합니다. 실행 사용자는 본인, 접근 권한은 조직 정책이 허용하는 범위로 설정합니다."],
       ["4", "웹 앱 주소를 GitHub Pages 공개 설정의 API_URL에 입력합니다."],
       ["접속", "웹 화면의 관리자 설정으로 들어가 접속 이름과 개인 PIN 6자리를 등록합니다."],

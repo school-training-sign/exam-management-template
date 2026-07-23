@@ -648,6 +648,18 @@ test("초기 설정과 스키마 마이그레이션이 새 시스템 이름과 �
   assert.match(source["Repository.gs"], /\["SCHOOL", "CODE", "SALT"\]\.join\("_"\)/);
 });
 
+test("관리자 암호는 초기 설정과 변경 화면에서 4자 이상을 요구한다", () => {
+  const initBlock = source["Code.gs"].match(/function initializeExamSystem[\s\S]*?\n}\n\nfunction changeAdminPassword/)?.[0] || "";
+  const changeBlock = source["Code.gs"].match(/function changeAdminPassword[\s\S]*?\n}\n\nfunction showDeploymentGuide/)?.[0] || "";
+  assert.match(initBlock, /password\.length < 4/);
+  assert.match(initBlock, /관리자 암호를 4자 이상/);
+  assert.match(changeBlock, /password\.length < 4/);
+  assert.match(changeBlock, /관리자 암호를 4자 이상/);
+  assert.match(source["Repository.gs"], /4자 이상의 관리자 암호/);
+  assert.match(fs.readFileSync(path.join(root, "README.md"), "utf8"), /4자 이상의 관리자 암호/);
+  assert.doesNotMatch(source["Code.gs"], /password\.length < 8|8자 이상|10자 이상/);
+});
+
 test("원안 포장 스키마는 기존 11개 시트를 유지하면서 시간표 열만 안전하게 확장한다", () => {
   assert.match(source["Config.gs"], /VERSION:\s*"3\.1\.0"/);
   assert.match(source["Config.gs"], /SCHEMA_VERSION:\s*"5"/);

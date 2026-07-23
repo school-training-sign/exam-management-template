@@ -1,5 +1,4 @@
 function onOpen() {
-  ensureSheets_();
   SpreadsheetApp.getUi()
     .createMenu("정기고사 관리")
     .addItem("초기 설정", "initializeExamSystem")
@@ -14,13 +13,13 @@ function initializeExamSystem() {
   ensureSheets_();
   const schoolNamePrompt = ui.prompt("초기 설정", "학교명을 입력하세요.", ui.ButtonSet.OK_CANCEL);
   if (schoolNamePrompt.getSelectedButton() !== ui.Button.OK) return;
-  const passwordPrompt = ui.prompt("초기 설정", "관리자 암호를 입력하세요. 10자 이상을 권장합니다.", ui.ButtonSet.OK_CANCEL);
+  const passwordPrompt = ui.prompt("초기 설정", "관리자 암호를 4자 이상 입력하세요.", ui.ButtonSet.OK_CANCEL);
   if (passwordPrompt.getSelectedButton() !== ui.Button.OK) return;
 
   const schoolName = String(schoolNamePrompt.getResponseText() || "").trim();
   const password = String(passwordPrompt.getResponseText() || "");
-  if (!schoolName || password.length < 8) {
-    ui.alert("학교명을 입력하고 관리자 암호를 8자 이상으로 설정하세요.");
+  if (!schoolName || password.length < 4) {
+    ui.alert("학교명을 입력하고 관리자 암호를 4자 이상으로 설정하세요.");
     return;
   }
 
@@ -56,8 +55,8 @@ function changeAdminPassword() {
   const prompt = ui.prompt("관리자 암호 변경", "새 관리자 암호를 입력하세요.", ui.ButtonSet.OK_CANCEL);
   if (prompt.getSelectedButton() !== ui.Button.OK) return;
   const password = String(prompt.getResponseText() || "");
-  if (password.length < 8) {
-    ui.alert("관리자 암호를 8자 이상으로 설정하세요.");
+  if (password.length < 4) {
+    ui.alert("관리자 암호를 4자 이상으로 설정하세요.");
     return;
   }
   const salt = randomToken_();
