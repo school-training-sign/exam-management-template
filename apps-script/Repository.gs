@@ -15,7 +15,7 @@ function ensureSheets_() {
   let guide = spreadsheet.getSheetByName(SHEETS.GUIDE);
   if (!guide) guide = spreadsheet.insertSheet(SHEETS.GUIDE, 0);
   const guideText = guide.getLastRow() ? guide.getDataRange().getDisplayValues().flat().join(" ") : "";
-  if (!guideText.includes(APP.SYSTEM_NAME) || !guideText.includes(APP.VERSION) || guideText.includes(["학교", "코드"].join(""))) {
+  if (!guideText.includes(APP.SYSTEM_NAME) || !guideText.includes(APP.VERSION) || guideText.includes(["학교", "코드"].join("")) || guideText.includes("PIN 6자리")) {
     const oldGuideRange = guide.getDataRange();
     oldGuideRange.breakApart();
     oldGuideRange.clearContent();
@@ -25,7 +25,7 @@ function ensureSheets_() {
       ["2", "학교명과 4자 이상의 관리자 암호를 입력합니다."],
       ["3", "Apps Script를 웹 앱으로 배포합니다. 실행 사용자는 본인, 접근 권한은 조직 정책이 허용하는 범위로 설정합니다."],
       ["4", "웹 앱 주소를 GitHub Pages 공개 설정의 API_URL에 입력합니다."],
-      ["접속", "웹 화면의 관리자 설정으로 들어가 접속 이름과 개인 PIN 6자리를 등록합니다."],
+      ["접속", "웹 화면의 관리자 설정으로 들어가 접속 이름과 숫자 4~6자리 개인 PIN을 등록합니다."],
       ["데이터", "학생 이름은 학생 시트에만 저장되며 감사로그에는 남기지 않습니다."],
       ["버전", APP.VERSION],
     ]);

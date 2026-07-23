@@ -209,7 +209,7 @@ function userLogin_(request) {
   const pin = String(request.pin || "").trim();
   const rateKeys = loginRateKeys_("user", request, loginName);
   assertLoginAllowed_(rateKeys);
-  const user = loginName && /^\d{6}$/.test(pin) ? findAccessUserByLogin_(loginName) : null;
+  const user = loginName && /^\d{4,6}$/.test(pin) ? findAccessUserByLogin_(loginName) : null;
   const comparisonSalt = user ? user.pin_salt : "invalid-login-salt";
   const expectedHash = user ? user.pin_hash : "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
   const actualHash = hashAccessPin_(pin, comparisonSalt);
@@ -1217,7 +1217,7 @@ function validateLoginName_(value) {
 
 function validatePin_(value) {
   const pin = String(value == null ? "" : value).trim();
-  if (!/^\d{6}$/.test(pin)) throw apiError_("INVALID_PIN", "개인 PIN은 숫자 6자리로 입력하세요.");
+  if (!/^\d{4,6}$/.test(pin)) throw apiError_("INVALID_PIN", "개인 PIN은 숫자 4~6자리로 입력하세요.");
   return pin;
 }
 

@@ -23,7 +23,7 @@
 7. 학교명과 4자 이상의 관리자 암호를 입력합니다. 관리자 암호 원문은 저장되지 않습니다.
 8. `배포 → 새 배포 → 웹 앱`에서 실행 사용자는 본인, 액세스 권한은 조직 정책이 허용하는 가장 넓은 범위로 설정합니다.
 9. 웹 앱 URL을 프런트엔드 `public/assets/config.js`의 `API_URL`에 입력합니다.
-10. 공개 화면의 `관리자 설정`으로 들어가 첫 접속 사용자와 숫자 6자리 개인 PIN을 등록합니다.
+10. 공개 화면의 `관리자 설정`으로 들어가 첫 접속 사용자와 숫자 4~6자리 개인 PIN을 등록합니다.
 
 ## 운영
 
@@ -70,7 +70,7 @@
 - `admin_entry_login`: `{ password, client_id }`를 받아 사용자·관리자 세션을 함께 발급합니다. 접속 사용자가 없어도 첫 사용자 등록이 가능합니다.
 - `save_access_user`: `{ id?, login_name, pin? }`로 사용자를 추가하거나 접속 이름을 수정합니다.
 - `set_access_user_active`: `{ id, active }`로 접속을 허용하거나 차단합니다.
-- `reset_access_user_pin`: `{ id, pin }`으로 숫자 6자리 PIN을 다시 설정합니다.
+- `reset_access_user_pin`: `{ id, pin }`으로 숫자 4~6자리 PIN을 다시 설정합니다.
 - `save_subject_catalog`: `{ grade, subjects[] }`를 받아 해당 학년의 교과목 목록만 교체합니다.
 - `save_exam_notice_settings`: `{ notice: { year, semester, exam_name, greeting, notes[], issue_date, issuer } }`를 저장합니다.
 - `get_admin_bootstrap`과 관리자 저장 응답에는 구조화된 `access_users`, `subject_catalog`, `exam_notice`가 포함됩니다.

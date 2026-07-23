@@ -137,10 +137,10 @@ test("PIN 소금값·비공개 pepper 해시와 5분 세션 만료 정책이 있
   assert.match(source["Code.gs"], /CacheService\.getScriptCache\(\)/);
 });
 
-test("접속 이름과 6자리 PIN 로그인은 단일 실패 코드와 세 가지 시도 제한을 사용한다", () => {
+test("접속 이름과 숫자 4~6자리 PIN 로그인은 단일 실패 코드와 세 가지 시도 제한을 사용한다", () => {
   const loginBlock = source["Code.gs"].match(/function userLogin_[\s\S]*?\n}\n\nfunction verifyAdminPassword_/)?.[0] || "";
   assert.match(loginBlock, /request\.login_name/);
-  assert.match(loginBlock, /\^\\d\{6\}\$/);
+  assert.match(loginBlock, /\^\\d\{4,6\}\$/);
   assert.match(loginBlock, /INVALID_LOGIN/);
   assert.doesNotMatch(loginBlock, /USER_NOT_FOUND|USER_INACTIVE|INVALID_PIN/);
   assert.match(source["Code.gs"], /:client:/);
@@ -230,8 +230,12 @@ test("접속 이름 정규화와 PIN 검증 헬퍼가 기대한 결과를 만든
   const helpers = new Function(`${all}\nreturn { canonicalLoginName_, loginLookupKey_, validatePin_, safeAccessUser_ };`)();
   assert.equal(helpers.canonicalLoginName_("  Ｔｅａｃｈｅｒ   김  "), "Teacher 김");
   assert.equal(helpers.loginLookupKey_("  ＴＥＡＣＨＥＲ 김  "), "teacher 김");
+  assert.equal(helpers.validatePin_("1234"), "1234");
+  assert.equal(helpers.validatePin_("12345"), "12345");
   assert.equal(helpers.validatePin_("123456"), "123456");
-  assert.throws(() => helpers.validatePin_("12345"), { code: "INVALID_PIN" });
+  assert.throws(() => helpers.validatePin_("123"), { code: "INVALID_PIN" });
+  assert.throws(() => helpers.validatePin_("1234567"), { code: "INVALID_PIN" });
+  assert.throws(() => helpers.validatePin_("12가4"), { code: "INVALID_PIN" });
   assert.deepEqual(
     helpers.safeAccessUser_({ id: "u1", login_name: "김민수", active: true, updated_at: "now", pin_salt: "secret", pin_hash: "secret" }),
     { id: "u1", login_name: "김민수", active: true, updated_at: "now" },
@@ -658,6 +662,19 @@ test("관리자 암호는 초기 설정과 변경 화면에서 4자 이상을 �
   assert.match(source["Repository.gs"], /4자 이상의 관리자 암호/);
   assert.match(fs.readFileSync(path.join(root, "README.md"), "utf8"), /4자 이상의 관리자 암호/);
   assert.doesNotMatch(source["Code.gs"], /password\.length < 8|8자 이상|10자 이상/);
+});
+
+test("기존 6자리 PIN은 호환하면서 로그인·등록·재설정이 숫자 4~6자리를 허용한다", () => {
+  const loginBlock = source["Code.gs"].match(/function userLogin_[\s\S]*?\n}\n\nfunction verifyAdminPassword_/)?.[0] || "";
+  const validateBlock = source["Code.gs"].match(/function validatePin_[\s\S]*?\n}/)?.[0] || "";
+  assert.match(loginBlock, /\^\\d\{4,6\}\$/);
+  assert.match(validateBlock, /\^\\d\{4,6\}\$/);
+  assert.match(validateBlock, /숫자 4~6자리/);
+  assert.match(source["Code.gs"], /function saveAccessUser_[\s\S]*validatePin_\(request\.pin\)/);
+  assert.match(source["Code.gs"], /function resetAccessUserPin_[\s\S]*validatePin_\(request\.pin\)/);
+  assert.match(source["Repository.gs"], /guideText\.includes\("PIN 6자리"\)/);
+  assert.match(source["Repository.gs"], /숫자 4~6자리 개인 PIN/);
+  assert.doesNotMatch(source["Code.gs"], /\^\\d\{6\}\$|개인 PIN은 숫자 6자리/);
 });
 
 test("원안 포장 스키마는 기존 11개 시트를 유지하면서 시간표 열만 안전하게 확장한다", () => {
