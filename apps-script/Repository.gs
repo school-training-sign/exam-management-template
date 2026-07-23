@@ -39,6 +39,12 @@ function ensureSheets_() {
   if (!properties.getProperty(APP.PROPERTY_ACCESS_USER_PEPPER)) {
     properties.setProperty(APP.PROPERTY_ACCESS_USER_PEPPER, randomToken_() + randomToken_());
   }
+  if (!properties.getProperty(APP.PROPERTY_PACKAGING_INVITE_PEPPER)) {
+    properties.setProperty(APP.PROPERTY_PACKAGING_INVITE_PEPPER, randomToken_() + randomToken_());
+  }
+  if (!properties.getProperty(APP.PROPERTY_PACKAGING_INVITE_VERSION)) {
+    properties.setProperty(APP.PROPERTY_PACKAGING_INVITE_VERSION, "1");
+  }
   properties.deleteProperty(["SCHOOL", "CODE", "SALT"].join("_"));
   properties.deleteProperty(["SCHOOL", "CODE", "HASH"].join("_"));
 
@@ -188,7 +194,7 @@ function getPublicSettings_() {
 
 function setSetting_(key, value) {
   const now = nowIso_();
-  const rows = getRecords_(SHEETS.SETTINGS).filter((item) => String(item.key) !== String(key));
+  const rows = getRecordsFresh_(SHEETS.SETTINGS).filter((item) => String(item.key) !== String(key));
   rows.push({ key: key, value: value, updated_at: now });
   replaceRecords_(SHEETS.SETTINGS, rows);
 }
@@ -325,6 +331,101 @@ function normalizeStoredExamNotice_(value, schoolName) {
   };
 }
 
+function isValidClockTime_(value) {
+  const match = /^(\d{2}):(\d{2})$/.exec(String(value || "").trim());
+  return Boolean(match && Number(match[1]) >= 0 && Number(match[1]) <= 23 && Number(match[2]) >= 0 && Number(match[2]) <= 59);
+}
+
+function isValidDateTime_(value) {
+  const text = String(value || "").trim();
+  if (!text || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:?\d{2})?$/.test(text)) return false;
+  return Number.isFinite(new Date(text).getTime());
+}
+
+function defaultExamPackagingRows_() {
+  return [
+    ["slot_0830", "slot", "1회", "08:30", "08:55", "", 10],
+    ["slot_0900", "slot", "2회", "09:00", "09:25", "", 20],
+    ["slot_0930", "slot", "3회", "09:30", "09:55", "", 30],
+    ["slot_1000", "slot", "4회", "10:00", "10:25", "", 40],
+    ["slot_1030", "slot", "5회", "10:30", "10:55", "", 50],
+    ["slot_1100", "slot", "6회", "11:00", "11:25", "", 60],
+    ["slot_1130", "slot", "7회", "11:30", "11:55", "", 70],
+    ["break_lunch", "break", "점심시간", "12:00", "13:00", "과목 배정 불가", 80],
+    ["slot_1300", "slot", "8회", "13:00", "13:25", "", 90],
+    ["slot_1330", "slot", "9회", "13:30", "13:55", "", 100],
+    ["slot_1400", "slot", "10회", "14:00", "14:25", "", 110],
+    ["slot_1430", "slot", "11회", "14:30", "14:55", "", 120],
+    ["slot_1500", "slot", "12회", "15:00", "15:25", "", 130],
+    ["slot_1530", "slot", "13회", "15:30", "15:55", "", 140],
+    ["slot_1600", "slot", "14회", "16:00", "16:25", "", 150],
+  ].map((row) => ({
+    id: row[0], kind: row[1], period_label: row[2], start_time: row[3], end_time: row[4], note: row[5], sort_order: row[6],
+  }));
+}
+
+function defaultExamPackagingConfig_() {
+  return {
+    revision: 0,
+    input_deadline: "",
+    capacity: 3,
+    packaging_dates: [],
+    rows: defaultExamPackagingRows_(),
+    staff_assignments: [],
+  };
+}
+
+function normalizeStoredExamPackagingConfig_(value) {
+  const fallback = defaultExamPackagingConfig_();
+  const parsedValue = parseJson_(value, {});
+  const parsed = parsedValue && !Array.isArray(parsedValue) && typeof parsedValue === "object" ? parsedValue : {};
+  const dates = Array.isArray(parsed.packaging_dates)
+    ? parsed.packaging_dates.map((item) => String(item || "").trim()).filter(isValidIsoDate_)
+      .filter((item, index, all) => all.indexOf(item) === index).slice(0, 31)
+    : [];
+  const rowIds = new Set();
+  const rows = (Array.isArray(parsed.rows) ? parsed.rows : fallback.rows).map((item, index) => {
+    const id = String(item && item.id || "").trim().slice(0, 80);
+    const kind = item && item.kind === "break" ? "break" : "slot";
+    const startTime = String(item && item.start_time || "").trim();
+    const endTime = String(item && item.end_time || "").trim();
+    if (!id || rowIds.has(id) || !isValidClockTime_(startTime) || !isValidClockTime_(endTime) || startTime >= endTime) return null;
+    rowIds.add(id);
+    return {
+      id: id,
+      kind: kind,
+      period_label: String(item.period_label || "").trim().slice(0, 40),
+      start_time: startTime,
+      end_time: endTime,
+      note: String(item.note || "").trim().slice(0, 100),
+      sort_order: Number.isFinite(Number(item.sort_order)) ? Number(item.sort_order) : (index + 1) * 10,
+    };
+  }).filter(Boolean).slice(0, 60).sort((left, right) => left.sort_order - right.sort_order || left.start_time.localeCompare(right.start_time));
+  const staffSeen = new Set();
+  const staffAssignments = (Array.isArray(parsed.staff_assignments) ? parsed.staff_assignments : []).map((item) => {
+    const packagingDate = String(item && item.packaging_date || "").trim();
+    const slotId = String(item && item.slot_id || "").trim();
+    const key = packagingDate + "|" + slotId;
+    if (dates.indexOf(packagingDate) === -1 || !rowIds.has(slotId) || staffSeen.has(key)) return null;
+    staffSeen.add(key);
+    return { packaging_date: packagingDate, slot_id: slotId, staff_name: String(item.staff_name || "").trim().slice(0, 100) };
+  }).filter(Boolean);
+  return {
+    revision: Number.isInteger(Number(parsed.revision)) && Number(parsed.revision) >= 0 ? Number(parsed.revision) : 0,
+    input_deadline: isValidDateTime_(parsed.input_deadline) ? String(parsed.input_deadline).trim() : "",
+    capacity: Number.isInteger(Number(parsed.capacity)) && Number(parsed.capacity) >= 1 && Number(parsed.capacity) <= 20 ? Number(parsed.capacity) : 3,
+    packaging_dates: dates,
+    rows: rows,
+    staff_assignments: staffAssignments,
+  };
+}
+
+function getExamPackagingConfig_(fresh) {
+  const settings = (fresh ? getRecordsFresh_(SHEETS.SETTINGS) : getRecords_(SHEETS.SETTINGS));
+  const row = settings.find((item) => String(item.key) === "exam_packaging_config_json");
+  return normalizeStoredExamPackagingConfig_(row ? row.value : null);
+}
+
 function normalizeClassIds_(value) {
   let values = value;
   if (typeof value === "string") {
@@ -407,6 +508,8 @@ function adminBootstrap_() {
   const privateSettings = getSettings_();
   result.subject_catalog = normalizeStoredSubjectCatalog_(privateSettings.subject_catalog_json);
   result.exam_notice = normalizeStoredExamNotice_(privateSettings.exam_notice_json, result.settings.school_name);
+  result.exam_packaging_config = getExamPackagingConfig_();
+  result.exam_packaging_invite_status = examPackagingInviteStatus_();
   result.access_users = accessUsersForAdmin_();
   result.students = getRecords_(SHEETS.STUDENTS).filter(isActive_);
   result.timetable = getRecords_(SHEETS.TIMETABLE).map((item) => Object.assign({}, item, {

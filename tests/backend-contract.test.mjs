@@ -12,6 +12,18 @@ const source = Object.fromEntries(
 );
 const all = Object.values(source).join("\n");
 
+function readPublicTextFiles(directory, output = []) {
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    if ([".git", "node_modules"].includes(entry.name)) continue;
+    const full = path.join(directory, entry.name);
+    if (entry.isDirectory()) readPublicTextFiles(full, output);
+    else if ([".gs", ".js", ".mjs", ".json", ".md", ".yaml", ".yml"].includes(path.extname(entry.name))) {
+      output.push(fs.readFileSync(full, "utf8"));
+    }
+  }
+  return output;
+}
+
 function createLoginRateHarness(startMs = 2_000_000_000_000) {
   const clock = { now: startMs };
   const cacheValues = new Map();
@@ -86,6 +98,16 @@ test("이전 학교코드 로그인 계약과 관리자 암호 원문이 배포 
   );
   assert.equal(/ADMIN_PASSWORD\s*[:=]\s*["'][^"']+/.test(all), false);
   assert.doesNotMatch(all, /school_login|school_session|request\.school_code/);
+});
+
+test("공개 배포 자료에 운영 학교코드·외부 공유표 ID·Google Sheets 주소가 없다", () => {
+  const publicText = readPublicTextFiles(root).join("\n");
+  const retiredSchoolCode = ["HANYANG", "3520"].join("");
+  const sourceSheetId = ["1ukMUIjGhRILLj", "XwpTmxm3NecSz", "-5cD3khRnD1Xk6Nx8"].join("");
+  const sheetsPrefix = ["https://docs.google.com/", "spreadsheets/d/"].join("");
+  assert.equal(publicText.includes(retiredSchoolCode), false);
+  assert.equal(publicText.includes(sourceSheetId), false);
+  assert.equal(publicText.includes(sheetsPrefix), false);
 });
 
 test("요청 응답 형식과 권한 액션이 명시되어 있다", () => {
@@ -364,7 +386,7 @@ test("배포용 원본 통합문서가 포함되어 있다", () => {
 test("기존 시트에 revision·seat_order 열과 schema_version을 안전하게 추가한다", () => {
   assert.match(source["Config.gs"], /\[SHEETS\.COMPLETIONS\]:\s*\[[^\]]*"revision"/s);
   assert.match(source["Config.gs"], /\[SHEETS\.SEATING\]:\s*\[[^\]]*"seat_order"/s);
-  assert.match(source["Config.gs"], /SCHEMA_VERSION:\s*"4"/);
+  assert.match(source["Config.gs"], /SCHEMA_VERSION:\s*"5"/);
   assert.match(source["Repository.gs"], /requiredHeaders\.filter\(\(header\) => existing\.indexOf\(header\) === -1\)/);
   assert.match(source["Repository.gs"], /setSetting_\("schema_version", APP\.SCHEMA_VERSION\)/);
 });
@@ -445,7 +467,7 @@ test("접속 상태 heartbeat는 인증 세션을 짧은 캐시에만 집계한�
   assert.match(source["Code.gs"], /action === "presence_ping"[\s\S]*requireSession_\(request\.user_session,\s*"user"/);
   assert.match(source["Code.gs"], /request\.user_active === true/);
   assert.match(source["Code.gs"], /request\.action !== "presence_ping"/);
-  assert.match(source["Code.gs"], /leavePresence_\(request\.user_session\)/);
+  assert.match(source["Code.gs"], /leavePresence_\(request\.user_session,\s*"user"\)/);
   assert.match(source["Code.gs"], /function requireSession_\(token,\s*role,\s*touch\)/);
 
   const mutationBlock = source["Config.gs"].match(/const MUTATION_ACTIONS[\s\S]*?\]\);/)?.[0] || "";
@@ -606,8 +628,8 @@ test("가정통신문 설정은 표준 형태와 모든 길이·날짜 제한을
 });
 
 test("새 설정은 시트 추가 없이 설정 JSON으로 저장된다", () => {
-  assert.match(source["Config.gs"], /VERSION:\s*"3\.0\.0"/);
-  assert.match(source["Config.gs"], /SCHEMA_VERSION:\s*"4"/);
+  assert.match(source["Config.gs"], /VERSION:\s*"3\.1\.0"/);
+  assert.match(source["Config.gs"], /SCHEMA_VERSION:\s*"5"/);
   assert.match(source["Config.gs"], /\[SHEETS\.SETTINGS\]: \["key", "value", "updated_at"\]/);
   assert.equal((source["Config.gs"].match(/\[SHEETS\.[A-Z_]+\]: \[/g) || []).length, 10);
   assert.match(source["Repository.gs"], /setSetting_\("version", APP\.VERSION\)/);
@@ -624,4 +646,141 @@ test("초기 설정과 스키마 마이그레이션이 새 시스템 이름과 �
   assert.match(source["Repository.gs"], /oldGuideRange\.breakApart\(\)[\s\S]*oldGuideRange\.clearContent\(\)/);
   assert.match(source["Repository.gs"], /PROPERTY_ACCESS_USER_PEPPER/);
   assert.match(source["Repository.gs"], /\["SCHOOL", "CODE", "SALT"\]\.join\("_"\)/);
+});
+
+test("원안 포장 스키마는 기존 11개 시트를 유지하면서 시간표 열만 안전하게 확장한다", () => {
+  assert.match(source["Config.gs"], /VERSION:\s*"3\.1\.0"/);
+  assert.match(source["Config.gs"], /SCHEMA_VERSION:\s*"5"/);
+  const timetableHeaders = source["Config.gs"].match(/\[SHEETS\.TIMETABLE\]:\s*\[([^\]]+)\]/s)?.[1] || "";
+  for (const header of [
+    "representative_teacher", "answer_sheet_type", "packaging_date", "packaging_slot_id",
+    "packaging_revision", "packaging_updated_at",
+  ]) assert.match(timetableHeaders, new RegExp(`"${header}"`));
+  assert.equal((source["Config.gs"].match(/\[SHEETS\.[A-Z_]+\]: \[/g) || []).length, 10);
+  assert.match(source["Repository.gs"], /requiredHeaders\.filter\(\(header\) => existing\.indexOf\(header\) === -1\)/);
+});
+
+test("원안 포장 여섯 API가 일반·관리자·비밀 링크 권한에 맞게 라우팅된다", () => {
+  for (const action of [
+    "redeem_exam_packaging_invite", "get_exam_packaging", "save_exam_packaging_items",
+    "save_exam_packaging_config", "create_exam_packaging_invite", "disable_exam_packaging_invite",
+  ]) assert.match(source["Code.gs"], new RegExp(action));
+  const mutationBlock = source["Config.gs"].match(/const MUTATION_ACTIONS[\s\S]*?\]\);/)?.[0] || "";
+  const adminBlock = source["Config.gs"].match(/const ADMIN_ACTIONS[\s\S]*?\]\);/)?.[0] || "";
+  assert.match(mutationBlock, /"save_exam_packaging_items"/);
+  for (const action of ["save_exam_packaging_config", "create_exam_packaging_invite", "disable_exam_packaging_invite"]) {
+    assert.match(mutationBlock, new RegExp(`"${action}"`));
+    assert.match(adminBlock, new RegExp(`"${action}"`));
+  }
+  assert.doesNotMatch(adminBlock, /"save_exam_packaging_items"/);
+  assert.match(source["Code.gs"], /if \(request\.packaging_session\)[\s\S]*get_exam_packaging[\s\S]*save_exam_packaging_items[\s\S]*throw apiError_\("FORBIDDEN"/);
+});
+
+test("시간표 일괄 저장은 기존 ID의 원안 포장 필드를 보존하고 요청 필드로 덮어쓰지 않는다", () => {
+  const block = source["Code.gs"].match(/function saveTimetable_[\s\S]*?\n}\n\nfunction normalizeSubjectCatalogInput_/)?.[0] || "";
+  assert.match(block, /const oldById = new Map/);
+  assert.match(block, /const preserved = .*oldById/);
+  for (const field of [
+    "representative_teacher", "answer_sheet_type", "packaging_date", "packaging_slot_id",
+    "packaging_revision", "packaging_updated_at",
+  ]) assert.match(block, new RegExp(`${field}:`));
+  assert.doesNotMatch(block, /item\.representative_teacher|item\.answer_sheet_type|item\.packaging_date|item\.packaging_slot_id/);
+});
+
+test("원안 포장 설정은 설정 JSON에 revision·마감·정원·날짜·행·담당자를 저장한다", () => {
+  assert.match(source["Repository.gs"], /exam_packaging_config_json/);
+  assert.match(source["Code.gs"], /setSetting_\("exam_packaging_config_json", JSON\.stringify\(next\)\)/);
+  assert.match(source["Repository.gs"], /capacity:\s*3/);
+  assert.match(source["Repository.gs"], /kind:\s*row\[1\]/);
+  assert.match(source["Repository.gs"], /staff_assignments:/);
+  assert.match(source["Repository.gs"], /result\.exam_packaging_config = getExamPackagingConfig_\(\)/);
+});
+
+test("원안 포장 설정 정규화는 날짜·시간대 중복과 정원 오류를 거부하고 쉬는 시간 담당자를 허용한다", () => {
+  const helpers = new Function(`${all}\nreturn { normalizeExamPackagingConfigInput_, examPackagingConfigImpact_, apiError_ };`)();
+  const base = {
+    input_deadline: "2030-05-01T17:00:00+09:00",
+    capacity: 3,
+    packaging_dates: ["2030-05-02"],
+    rows: [
+      { id: "slot_a", kind: "slot", period_label: "1회", start_time: "09:00", end_time: "09:25", sort_order: 1 },
+      { id: "break_a", kind: "break", period_label: "휴식", start_time: "09:25", end_time: "09:40", sort_order: 2 },
+    ],
+    staff_assignments: [
+      { packaging_date: "2030-05-02", slot_id: "slot_a", staff_name: "가상담당" },
+      { packaging_date: "2030-05-02", slot_id: "break_a", staff_name: "가상휴식담당" },
+    ],
+  };
+  const normalized = helpers.normalizeExamPackagingConfigInput_(base);
+  assert.equal(normalized.capacity, 3);
+  assert.equal(normalized.rows[1].kind, "break");
+  assert.equal(normalized.staff_assignments[1].slot_id, "break_a");
+  assert.throws(() => helpers.normalizeExamPackagingConfigInput_({ ...base, capacity: 0 }), { code: "INVALID_PACKAGING_CAPACITY" });
+  assert.throws(() => helpers.normalizeExamPackagingConfigInput_({ ...base, packaging_dates: ["2030-05-02", "2030-05-02"] }), { code: "DUPLICATE_PACKAGING_DATE" });
+  assert.throws(() => helpers.normalizeExamPackagingConfigInput_({ ...base, rows: [base.rows[0], { ...base.rows[0], id: "slot_b" }] }), { code: "DUPLICATE_PACKAGING_TIME" });
+  assert.throws(() => helpers.normalizeExamPackagingConfigInput_({ ...base, rows: [{ ...base.rows[0], end_time: "09:30" }] }), { code: "INVALID_PACKAGING_SLOT_DURATION" });
+  assert.throws(() => helpers.normalizeExamPackagingConfigInput_({ ...base, rows: [base.rows[0], { ...base.rows[1], start_time: "09:20" }] }), { code: "OVERLAPPING_PACKAGING_TIME" });
+  assert.deepEqual(
+    helpers.examPackagingConfigImpact_(normalized, [
+      { id: "ok", packaging_date: "2030-05-02", packaging_slot_id: "slot_a" },
+      { id: "bad", packaging_date: "2030-05-03", packaging_slot_id: "slot_a" },
+    ]),
+    { affected_count: 1, assigned_items: 1, timetable_ids: ["bad"] },
+  );
+});
+
+test("항목 저장은 설정·항목 revision과 쉬는 시간·정원 3건을 한 잠금 안에서 검사한다", () => {
+  const block = source["Code.gs"].match(/function saveExamPackagingItems_[\s\S]*?\n}\n\nfunction cleanup_/)?.[0] || "";
+  assert.match(block, /expected_config_revision/);
+  assert.match(block, /PACKAGING_CONFIG_CONFLICT/);
+  assert.match(block, /incoming\.expected_revision/);
+  assert.match(block, /PACKAGING_REVISION_CONFLICT/);
+  assert.match(block, /PACKAGING_BREAK_NOT_ASSIGNABLE/);
+  assert.match(block, /count > config\.capacity[\s\S]*PACKAGING_SLOT_FULL/);
+  const wrapper = source["Code.gs"].match(/function withPackagingMutation_[\s\S]*?\n}\n\nfunction inferCount_/)?.[0] || "";
+  assert.match(wrapper, /LockService\.getScriptLock\(\)/);
+  assert.match(wrapper, /tryLock\(28000\)/);
+  assert.match(wrapper, /requirePackagingSession_\(request\.packaging_session, false\)/);
+  assert.match(wrapper, /writeMutationCache_/);
+});
+
+test("비밀 링크는 256비트 원문을 해시로만 저장하고 30분 세션·버전 폐기를 적용한다", () => {
+  assert.match(source["Config.gs"], /PACKAGING_SESSION_TTL_SECONDS:\s*1800/);
+  assert.match(source["Code.gs"], /const token = randomSecret256_\(\)/);
+  assert.match(source["Code.gs"], /function randomSecret256_[\s\S]*hashSecret_\(entropy/);
+  assert.match(source["Code.gs"], /hashExamPackagingInviteToken_\(token, salt, pepper\)/);
+  assert.match(source["Code.gs"], /PROPERTY_PACKAGING_INVITE_HASH/);
+  assert.match(source["Code.gs"], /role:\s*"packaging"/);
+  assert.match(source["Code.gs"], /Number\(session\.invite_version\) !== currentVersion/);
+  assert.match(source["Code.gs"], /getScriptCache\(\)\.put\("session:" \+ token, JSON\.stringify\(session\), APP\.PACKAGING_SESSION_TTL_SECONDS\)/);
+  assert.match(source["Code.gs"], /fragment:\s*"#packaging=" \+ token/);
+  assert.match(source["Code.gs"], /request\.action === "create_exam_packaging_invite"[\s\S]*__committed:\s*true/);
+  assert.doesNotMatch(source["Repository.gs"], /getPublicSettings_[\s\S]*PROPERTY_PACKAGING_INVITE_HASH/);
+  assert.match(source["Code.gs"], /active:\s*Boolean\(enabled && !expired\)/);
+  assert.match(source["Code.gs"], /action === "save_exam_packaging_items"/);
+});
+
+test("비밀 링크 컨텍스트는 학생·학급·접속 사용자 없이 최소 고사 자료와 완료 집계만 반환한다", () => {
+  const block = source["Code.gs"].match(/function getExamPackaging_[\s\S]*?\n}\n\nfunction examPackagingInviteStatus_/)?.[0] || "";
+  for (const field of ["settings", "exam_title", "exam_dates", "items", "config", "summary", "read_only"]) {
+    assert.match(block, new RegExp(`${field}:`));
+  }
+  assert.doesNotMatch(block, /SHEETS\.STUDENTS|SHEETS\.CLASSES|getAccessUsers_|access_users/);
+  const helpers = new Function(`${all}\nreturn { examPackagingSummary_, isPackagingDeadlinePassed_ };`)();
+  assert.deepEqual(helpers.examPackagingSummary_([
+    { packaging_date: "2030-05-02", packaging_slot_id: "slot_a", answer_sheet_type: "card" },
+    { packaging_date: "", packaging_slot_id: "", answer_sheet_type: "" },
+  ]), { total: 2, assigned: 1, unassigned: 1, answer_selected: 1, answer_unselected: 1 });
+  assert.equal(helpers.isPackagingDeadlinePassed_({ input_deadline: "2030-05-01T00:00:00Z" }, Date.parse("2030-05-02T00:00:00Z")), true);
+});
+
+test("원안 포장 전용 접속 현황과 감사로그는 별도 범위와 비식별 세션 ID를 사용한다", () => {
+  assert.match(source["Code.gs"], /presence:registry:packaging:v1/);
+  assert.match(source["Code.gs"], /request\.packaging_active === true/);
+  assert.match(source["Code.gs"], /request\.scope === "exam_packaging" \? "packaging" : "user"/);
+  assert.match(source["Code.gs"], /request\.packaging_session \|\| request\.user_session/);
+  assert.match(source["Code.gs"], /safeAppendAudit_\("packaging"[\s\S]*issued\.session\.session_id/);
+  const wrapper = source["Code.gs"].match(/function withPackagingMutation_[\s\S]*?\n}\n\nfunction inferCount_/)?.[0] || "";
+  assert.match(wrapper, /actorId = String\(session\.session_id/);
+  assert.doesNotMatch(wrapper, /representative_teacher|staff_name|login_name/);
 });
