@@ -78,7 +78,10 @@ function showDeploymentGuide() {
 }
 
 function doGet() {
-  return jsonOutput_({ ok: true, data: { service: "exam-management", version: APP.VERSION }, error: null });
+  // 최초 연결은 배포 관리자가 서버에 지정한 학교 원장에만 적용된다.
+  ensureSchemaOnRequest_();
+  if (academicLinkStatus_().state === "pending") syncAcademicData_(false);
+  return jsonOutput_({ ok: true, data: { service: "exam-management", version: APP.VERSION, academic_link_state: academicLinkStatus_().state }, error: null });
 }
 
 function doPost(event) {
@@ -161,6 +164,10 @@ function dispatch_(request) {
     }
   }
 
+  if (["save_class", "delete_class", "replace_students", "import_students", "save_student", "delete_student"].includes(action) && academicSourceConfig_().spreadsheet_id) {
+    throw apiError_("ACADEMIC_MANAGED_RECORD", "연결된 학급·학생 명단은 학적 통합에서 수정한 뒤 동기화하세요.");
+  }
+
   if (MUTATION_ACTIONS.has(action)) {
     return withMutation_(request, ADMIN_ACTIONS.has(action) ? "admin" : "user", user.user_id, () => route_(action, request));
   }
@@ -169,8 +176,11 @@ function dispatch_(request) {
 
 function route_(action, request, userSession) {
   switch (action) {
-    case "get_bootstrap": return bootstrapForUser_(false, userSession);
-    case "get_admin_bootstrap": return bootstrapForUser_(true, userSession);
+    case "get_bootstrap": syncAcademicData_(false); return bootstrapForUser_(false, userSession);
+    case "get_admin_bootstrap": syncAcademicData_(false); return bootstrapForUser_(true, userSession);
+    case "sync_academic_data":
+      if (!request.request_id) throw apiError_("REQUEST_ID_REQUIRED", "동기화 요청 식별자가 없습니다.");
+      syncAcademicData_(true, request.request_id, userSession.user_id); return bootstrapForUser_(true, userSession);
     case "get_absence_context": return getAbsenceContext_(request);
     case "submit_absence_input": return submitAbsenceInput_(request);
     case "get_hq_status": return getHqStatus_(request);
@@ -1312,7 +1322,7 @@ function timetableDeleteImpact_(target, timetable) {
     enrollments: removeEnrollments
       ? getRecords_(SHEETS.ENROLLMENTS).filter((item) =>
           Number(item.grade) === Number(target.grade) &&
-          String(item.subject_name) === String(target.subject_name)
+          String(item.subject_name) === String(target.subject_name) && !item.source_academic_year
         ).length
       : 0,
     seat_charts: getRecords_(SHEETS.SEATING).filter((item) =>
@@ -1338,7 +1348,7 @@ function deleteTimetable_(request) {
   if (impact.remove_subject_enrollments) {
     replaceRecords_(SHEETS.ENROLLMENTS, getRecords_(SHEETS.ENROLLMENTS).filter((item) => !(
       Number(item.grade) === Number(target.grade) &&
-      String(item.subject_name) === String(target.subject_name)
+      String(item.subject_name) === String(target.subject_name) && !item.source_academic_year
     )));
   }
   replaceRecords_(SHEETS.SEATING, getRecords_(SHEETS.SEATING).filter((item) => !(
@@ -1431,7 +1441,16 @@ function saveEnrollments_(request) {
       { errors: errors, unmatched_count: errors.length, matched_count: validRows.length }
     );
   }
-  const rows = oldRows.filter((item) => Number(item.grade) !== grade).concat(validRows);
+  let rows;
+  if (academicSourceConfig_().spreadsheet_id) {
+    const changes = new Map(validRows.map((row) => [[row.student_id, row.subject_name].join("|"), row]));
+    const managed = new Set(oldRows.filter((row) => row.source_academic_year).map((row) => [row.student_id, row.subject_name].join("|")));
+    if (validRows.some((row) => !managed.has([row.student_id, row.subject_name].join("|")))) throw apiError_("ACADEMIC_MANAGED_RECORD", "수강 과목은 학적 통합에서 수정하세요. 고사 통합에서는 기존 수강생의 시험 호실만 입력할 수 있습니다.");
+    rows = oldRows.map((row) => {
+      const change = changes.get([row.student_id, row.subject_name].join("|"));
+      return change ? Object.assign({}, row, { room_name: change.room_name, updated_at: now }) : row;
+    });
+  } else rows = oldRows.filter((item) => Number(item.grade) !== grade).concat(validRows);
   replaceRecords_(SHEETS.ENROLLMENTS, rows);
   return Object.assign(adminBootstrap_(), {
     enrollment_result: {

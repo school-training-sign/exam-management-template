@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
-const files = ["Config.gs", "Repository.gs", "Code.gs"];
+const files = ["Config.gs", "Repository.gs", "Code.gs", "Academic.gs"];
 const source = Object.fromEntries(
   files.map((name) => [name, fs.readFileSync(path.join(root, "apps-script", name), "utf8")]),
 );
@@ -367,8 +367,8 @@ test("사용자 세션은 사용자 ID·버전을 검증하고 잠금 획득 뒤
 });
 
 test("세션 복원 bootstrap과 로그인 응답에 current_user가 포함된다", () => {
-  assert.match(source["Code.gs"], /case "get_bootstrap": return bootstrapForUser_\(false, userSession\)/);
-  assert.match(source["Code.gs"], /case "get_admin_bootstrap": return bootstrapForUser_\(true, userSession\)/);
+  assert.match(source["Code.gs"], /case "get_bootstrap": syncAcademicData_\(false\); return bootstrapForUser_\(false, userSession\)/);
+  assert.match(source["Code.gs"], /case "get_admin_bootstrap": syncAcademicData_\(false\); return bootstrapForUser_\(true, userSession\)/);
   assert.match(source["Code.gs"], /bootstrapForCurrentUser_\(teacherBootstrap_\(\), currentUser\)/);
   assert.match(source["Code.gs"], /bootstrapForCurrentUser_\(adminBootstrap_\(\), currentUser\)/);
 });
@@ -390,7 +390,7 @@ test("배포용 원본 통합문서가 포함되어 있다", () => {
 test("기존 시트에 revision·seat_order 열과 schema_version을 안전하게 추가한다", () => {
   assert.match(source["Config.gs"], /\[SHEETS\.COMPLETIONS\]:\s*\[[^\]]*"revision"/s);
   assert.match(source["Config.gs"], /\[SHEETS\.SEATING\]:\s*\[[^\]]*"seat_order"/s);
-  assert.match(source["Config.gs"], /SCHEMA_VERSION:\s*"5"/);
+  assert.match(source["Config.gs"], /SCHEMA_VERSION:\s*"6"/);
   assert.match(source["Repository.gs"], /requiredHeaders\.filter\(\(header\) => existing\.indexOf\(header\) === -1\)/);
   assert.match(source["Repository.gs"], /setSetting_\("schema_version", APP\.SCHEMA_VERSION\)/);
 });
@@ -633,7 +633,7 @@ test("가정통신문 설정은 표준 형태와 모든 길이·날짜 제한을
 
 test("새 설정은 시트 추가 없이 설정 JSON으로 저장된다", () => {
   assert.match(source["Config.gs"], /VERSION:\s*"3\.1\.0"/);
-  assert.match(source["Config.gs"], /SCHEMA_VERSION:\s*"5"/);
+  assert.match(source["Config.gs"], /SCHEMA_VERSION:\s*"6"/);
   assert.match(source["Config.gs"], /\[SHEETS\.SETTINGS\]: \["key", "value", "updated_at"\]/);
   assert.equal((source["Config.gs"].match(/\[SHEETS\.[A-Z_]+\]: \[/g) || []).length, 10);
   assert.match(source["Repository.gs"], /setSetting_\("version", APP\.VERSION\)/);
@@ -679,7 +679,7 @@ test("기존 6자리 PIN은 호환하면서 로그인·등록·재설정이 숫�
 
 test("원안 포장 스키마는 기존 11개 시트를 유지하면서 시간표 열만 안전하게 확장한다", () => {
   assert.match(source["Config.gs"], /VERSION:\s*"3\.1\.0"/);
-  assert.match(source["Config.gs"], /SCHEMA_VERSION:\s*"5"/);
+  assert.match(source["Config.gs"], /SCHEMA_VERSION:\s*"6"/);
   const timetableHeaders = source["Config.gs"].match(/\[SHEETS\.TIMETABLE\]:\s*\[([^\]]+)\]/s)?.[1] || "";
   for (const header of [
     "representative_teacher", "answer_sheet_type", "packaging_date", "packaging_slot_id",

@@ -498,6 +498,7 @@ function seatNaturalKey_(chart) {
 function teacherBootstrap_() {
   return {
     settings: getPublicSettings_(),
+    academic_link: academicLinkStatus_(),
     classes: getRecords_(SHEETS.CLASSES).filter(isActive_),
     exam_dates: getRecords_(SHEETS.EXAM_DATES).filter(isActive_),
   };
@@ -505,6 +506,7 @@ function teacherBootstrap_() {
 
 function adminBootstrap_() {
   const result = teacherBootstrap_();
+  result.academic_link = academicLinkStatus_();
   const privateSettings = getSettings_();
   result.subject_catalog = normalizeStoredSubjectCatalog_(privateSettings.subject_catalog_json);
   result.exam_notice = normalizeStoredExamNotice_(privateSettings.exam_notice_json, result.settings.school_name);
@@ -515,7 +517,8 @@ function adminBootstrap_() {
   result.timetable = getRecords_(SHEETS.TIMETABLE).map((item) => Object.assign({}, item, {
     class_ids: normalizeClassIds_(item.class_ids),
   }));
-  result.enrollments = getRecords_(SHEETS.ENROLLMENTS);
+  const activeStudentIds = new Set(result.students.map((student) => String(student.id)));
+  result.enrollments = getRecords_(SHEETS.ENROLLMENTS).filter((row) => activeStudentIds.has(String(row.student_id)));
   result.seat_charts = getRecords_(SHEETS.SEATING).map(deserializeSeat_).reverse();
   return result;
 }

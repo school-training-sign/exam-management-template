@@ -1,6 +1,6 @@
 const APP = Object.freeze({
   VERSION: "3.1.0",
-  SCHEMA_VERSION: "5",
+  SCHEMA_VERSION: "6",
   SYSTEM_NAME: "한양대학교사범대학부속고등학교 통합 시스템",
   TIMEZONE: "Asia/Seoul",
   USER_TTL_SECONDS: 300,
@@ -48,11 +48,11 @@ const SHEETS = Object.freeze({
 
 const HEADERS = Object.freeze({
   [SHEETS.SETTINGS]: ["key", "value", "updated_at"],
-  [SHEETS.CLASSES]: ["id", "grade", "class_num", "active", "updated_at"],
-  [SHEETS.STUDENTS]: ["id", "class_id", "number", "name", "active", "updated_at"],
+  [SHEETS.CLASSES]: ["id", "grade", "class_num", "active", "updated_at", "source_academic_year"],
+  [SHEETS.STUDENTS]: ["id", "class_id", "number", "name", "active", "updated_at", "source_student_uid", "source_academic_year"],
   [SHEETS.EXAM_DATES]: ["id", "exam_date", "label", "active", "updated_at"],
   [SHEETS.TIMETABLE]: ["id", "exam_date", "grade", "period", "start_time", "end_time", "subject_name", "subject_type", "room_name", "class_ids", "updated_at", "representative_teacher", "answer_sheet_type", "packaging_date", "packaging_slot_id", "packaging_revision", "packaging_updated_at"],
-  [SHEETS.ENROLLMENTS]: ["id", "grade", "class_id", "student_id", "subject_name", "room_name", "updated_at"],
+  [SHEETS.ENROLLMENTS]: ["id", "grade", "class_id", "student_id", "subject_name", "room_name", "updated_at", "source_academic_year", "semester", "source_student_uid", "source_subject_id", "source_section_id", "section_name"],
   [SHEETS.ABSENCES]: ["key", "id", "exam_date", "period", "class_id", "student_id", "reason", "reason_detail", "updated_at"],
   [SHEETS.COMPLETIONS]: ["key", "id", "exam_date", "period", "class_id", "completed_at", "updated_at", "revision"],
   [SHEETS.SEATING]: ["id", "mode", "exam_date", "period", "grade", "class_id", "subject_name", "room_name", "rows", "cols", "start_side", "seat_order", "disabled_seats_json", "examinee_ids_json", "assignment_json", "updated_at"],
@@ -96,6 +96,7 @@ const MUTATION_ACTIONS = new Set([
 ]);
 
 const ADMIN_ACTIONS = new Set([
+  "sync_academic_data",
   "get_admin_bootstrap",
   "get_hq_status",
   "get_period_report",
