@@ -189,13 +189,13 @@ function syncAcademicData_(force, requestId, actorId) {
   if (!config.spreadsheet_id) { if (force) throw apiError_("ACADEMIC_NOT_CONFIGURED", "학적 원장 연결이 설정되지 않았습니다."); return; }
   const status = academicLinkStatus_();
   if (!force && status.state === "error" && Date.now() - new Date(status.attempted_at || 0).getTime() < 60000) return;
-  if (!force && status.academic_year === config.academic_year && status.semester === config.semester && Date.now() - new Date(status.synced_at || 0).getTime() < 300000) return;
+  if (!force && status.integration_version === 1 && status.academic_year === config.academic_year && status.semester === config.semester && Date.now() - new Date(status.synced_at || 0).getTime() < 300000) return;
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(force ? 28000 : 1000)) { if (force) throw apiError_("BUSY", "다른 저장이 진행 중입니다. 다시 시도하세요."); return; }
   try {
     if (requestKey && requestCache.get(requestKey)) return;
     const latest = academicLinkStatus_();
-    if (!force && latest.state === "connected" && latest.academic_year === config.academic_year && latest.semester === config.semester && Date.now() - new Date(latest.synced_at || 0).getTime() < 300000) return;
+    if (!force && latest.integration_version === 1 && latest.state === "connected" && latest.academic_year === config.academic_year && latest.semester === config.semester && Date.now() - new Date(latest.synced_at || 0).getTime() < 300000) return;
     const snapshot = readAcademicSnapshot_(config), now = nowIso_();
     const before = { classes: getRecordsFresh_(SHEETS.CLASSES), students: getRecordsFresh_(SHEETS.STUDENTS), enrollments: getRecordsFresh_(SHEETS.ENROLLMENTS), timetable: getRecordsFresh_(SHEETS.TIMETABLE), settings: getRecordsFresh_(SHEETS.SETTINGS) };
     const next = planAcademicMerge_(snapshot, before, now);
@@ -214,7 +214,7 @@ function syncAcademicData_(force, requestId, actorId) {
     Object.keys(snapshot.catalog).forEach((grade) => { catalog[grade] = Array.from(new Set([...(snapshot.catalog[grade] || []), ...(catalog[grade] || []).filter((name) => !(priorCatalog[grade] || []).includes(name))])).sort((a, b) => a.localeCompare(b, "ko")); });
     setSetting_("subject_catalog_json", JSON.stringify(catalog));
     setSetting_("academic_catalog_json", JSON.stringify(snapshot.catalog));
-    setSetting_("academic_sync_status_json", JSON.stringify({ state: "connected", academic_year: snapshot.academic_year, semester: snapshot.semester, synced_at: now,
+    setSetting_("academic_sync_status_json", JSON.stringify({ state: "connected", integration_version: 1, academic_year: snapshot.academic_year, semester: snapshot.semester, synced_at: now,
       counts: { classes: snapshot.classes.length, students: snapshot.students.length, enrollments: snapshot.courses.length, subjects: Object.values(snapshot.catalog).reduce((sum, names) => sum + names.length, 0) }, warnings: snapshot.warnings }));
     } catch (error) {
       replaceRecords_(SHEETS.CLASSES, before.classes); replaceRecords_(SHEETS.STUDENTS, before.students); replaceRecords_(SHEETS.ENROLLMENTS, before.enrollments); replaceRecords_(SHEETS.SETTINGS, before.settings); throw error;

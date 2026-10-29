@@ -80,7 +80,7 @@ function showDeploymentGuide() {
 function doGet() {
   // 최초 연결은 배포 관리자가 서버에 지정한 학교 원장에만 적용된다.
   ensureSchemaOnRequest_();
-  if (academicLinkStatus_().state === "pending") syncAcademicData_(false);
+  if (["pending", "connected"].includes(academicLinkStatus_().state)) syncAcademicData_(false);
   return jsonOutput_({ ok: true, data: { service: "exam-management", version: APP.VERSION, academic_link_state: academicLinkStatus_().state }, error: null });
 }
 
