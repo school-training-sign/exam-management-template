@@ -48,6 +48,7 @@ function readAcademicSnapshot_(config) {
     enrollments: readAcademicTable_(book, "시스템_수강", ["student_uid", "academic_year", "subject_id"]).filter(inYear),
     courses: readAcademicTable_(book, "시스템_선택과목명단").filter(inYear),
     plans: readAcademicTable_(book, "시스템_교육과정").filter(inYear),
+    section_map: parseJson_((readAcademicTable_(book, "시스템_설정", ["setting_key", "setting_value_json"]).find((row) => row.setting_key === "course_section_map_" + config.academic_year) || {}).setting_value_json, {}),
   };
   if (typeof academicFallbackPlan_ === "function") [2, 3].forEach((grade) => {
     if (!tables.plans.some((row) => Number(row.grade) === grade)) {
@@ -94,6 +95,7 @@ function buildAcademicSnapshot_(tables, config) {
   tables.plans.forEach((plan) => academicList_(plan.groups_json).filter((group) => inSemester(group.semester)).forEach((group) => academicList_(group.subjects).forEach((name) => addSubject(plan.grade, name))));
   const studentByUid = new Map(students.map((row) => [row.source_student_uid, row]));
   const sections = new Map(tables.sections.filter(academicActive_).map((row) => [String(row.section_id), row]));
+  const canonicalCourseUids = new Set(tables.courses.filter(academicActive_).filter((row) => academicList_(row.choices_json).some((choice) => inSemester(choice.semester))).map((row) => String(row.student_uid)));
   const courseKeys = new Set();
   function addCourse(uid, name, subjectId, sectionId) {
     const student = studentByUid.get(String(uid)); if (!student) return;
@@ -110,6 +112,7 @@ function buildAcademicSnapshot_(tables, config) {
     if (!subject || !academicActive_(subject)) return;
     const semester = String(subject.code || "").split(":")[0];
     if (/^[12]$/.test(semester) && !inSemester(semester)) return;
+    if (canonicalCourseUids.has(String(row.student_uid))) return;
     addCourse(row.student_uid, subject.name, row.subject_id, row.section_id);
   });
   const recordUids = new Set();
@@ -124,7 +127,13 @@ function buildAcademicSnapshot_(tables, config) {
       const matches = catalog[String(student.grade)].filter((name) => normalized === academicNameKey_(name) || (normalized.startsWith(academicNameKey_(name)) && /^[a-f]\d+$/i.test(normalized.slice(academicNameKey_(name).length))));
       if (matches.length > 1 || (!matches.length && choice.review_needed)) { warnings.unreviewed_choices += 1; return; }
       const name = matches[0] || choice.name || choice.raw_subject;
-      if (name && !["-", "없음", "미선택"].includes(name)) addCourse(row.student_uid, name, choice.subject_id, choice.section_id);
+      const sourceCode = choice.source_code || (/([A-F]\d+)$/i.exec(original) || [])[1] || "";
+      const matchingSections = Array.from(sections.values()).filter((section) => {
+        const meta = (tables.section_map || {})[section.section_id];
+        return meta && String(meta.subject_id) === String(choice.subject_id) && String(meta.semester) === String(choice.semester) && String(meta.slot) === String(choice.slot) && String(meta.source_code || "") === String(sourceCode);
+      });
+      const sectionId = choice.section_id || (matchingSections.length === 1 ? matchingSections[0].section_id : "");
+      if (name && !["-", "없음", "미선택"].includes(name)) addCourse(row.student_uid, name, choice.subject_id, sectionId);
     });
   });
   Object.values(catalog).forEach((names) => names.sort((a, b) => a.localeCompare(b, "ko")));

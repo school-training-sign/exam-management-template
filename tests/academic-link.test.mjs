@@ -29,3 +29,9 @@ test('반 이동 뒤에도 고유 ID로 연결하고 이전 학년도 학생·�
  before.classes.push({id:'old-year-class',grade:1,class_num:1,source_academic_year:2025,active:true});before.students.push({id:'old-year-student',class_id:'old-year-class',source_academic_year:2025,active:true});before.enrollments.push({id:'old-year-enrollment',class_id:'old-year-class',student_id:'old-year-student'});
  const next=helpers.planAcademicMerge_(data,before,'now');assert.equal(next.students.find(x=>x.id==='student-original').class_id,next.classes.find(x=>x.class_num===2).id);assert.equal(next.students.find(x=>x.id==='old-year-student').active,false);assert.ok(next.enrollments.find(x=>x.id==='old-year-enrollment'));
 });
+test('선택과목 명단을 수강 원장보다 우선하고 학적 분반 매핑을 함께 연결한다',()=>{
+ const source=fixture();source.subjects.push({subject_id:'stale-subject',grade:2,name:'가상 이전 과목',code:'2:CHOICE',active:true});source.enrollments.push({student_uid:'synthetic-a',subject_id:'stale-subject',status:'ACTIVE',active:true});
+ source.section_map={'section-a':{subject_id:'subject-a',semester:'2',slot:'선택1',source_code:'A1'}};
+ const choices=JSON.parse(source.courses[0].choices_json);choices[0].slot='선택1';source.courses[0].choices_json=JSON.stringify(choices);
+ const snapshot=helpers.buildAcademicSnapshot_(source,config);assert.ok(!snapshot.courses.some(row=>row.subject_name==='가상 이전 과목'));assert.equal(snapshot.courses[0].source_section_id,'section-a');assert.equal(snapshot.courses[0].section_name,'가상분반');assert.equal(snapshot.courses[0].room_name,undefined);
+});
