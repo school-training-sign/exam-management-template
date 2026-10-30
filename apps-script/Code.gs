@@ -268,27 +268,55 @@ function verifyAdminPassword_(request, action) {
 }
 
 function adminEntryLogin_(request) {
-  verifyAdminPassword_(request, "admin_entry_login");
-  if (PropertiesService.getScriptProperties().getProperty("ACADEMIC_SYNC_JOURNAL")) syncAcademicData_(true, createId_("recovery"), "system_admin");
-  ensureSchemaOnRequest_();
-  syncAcademicData_(false);
+  runAdminLoginPhase_("verify", () => verifyAdminPassword_(request, "admin_entry_login"));
+  runAdminLoginPhase_("recovery", () => {
+    if (PropertiesService.getScriptProperties().getProperty("ACADEMIC_SYNC_JOURNAL")) syncAcademicData_(true, createId_("recovery"), "system_admin");
+  });
+  runAdminLoginPhase_("schema", () => ensureSchemaOnRequest_());
+  runAdminLoginPhase_("sync", () => syncAcademicData_(false));
   const currentUser = { id: "system_admin", login_name: "관리자", active: true, system: true };
-  const userToken = createUserSession_(currentUser, true);
-  const adminToken = createAdminSession_(currentUser.id);
+  const userToken = runAdminLoginPhase_("user_session", () => createUserSession_(currentUser, true));
+  const adminToken = runAdminLoginPhase_("admin_session", () => createAdminSession_(currentUser.id));
   safeAppendAudit_("admin", "admin_entry_login", "session", "", 1, true, "OK", currentUser.id);
   return {
     user_session: userToken,
     admin_session: adminToken,
     current_user: currentUser,
-    bootstrap: withDataRead_(() => bootstrapForCurrentUser_(adminBootstrap_(), currentUser)),
+    bootstrap: runAdminLoginPhase_("bootstrap", () => withDataRead_(() => bootstrapForCurrentUser_(adminBootstrap_(), currentUser))),
   };
 }
 
 function adminLogin_(request, userSession) {
-  verifyAdminPassword_(request, "admin_login");
-  const token = createAdminSession_(userSession.user_id);
+  runAdminLoginPhase_("verify", () => verifyAdminPassword_(request, "admin_login"));
+  const token = runAdminLoginPhase_("admin_session", () => createAdminSession_(userSession.user_id));
   safeAppendAudit_("admin", "admin_login", "session", "", 1, true, "OK", userSession.user_id);
-  return { admin_session: token, bootstrap: bootstrapForUser_(true, userSession) };
+  return { admin_session: token, bootstrap: runAdminLoginPhase_("bootstrap", () => bootstrapForUser_(true, userSession)) };
+}
+
+function runAdminLoginPhase_(phase, operation) {
+  try { return operation(); }
+  catch (error) {
+    // Preserve deliberate public errors (wrong password/rate limit/recovery); never expose
+    // raw exception text, stack, workbook IDs, access-user records, passwords or PINs.
+    if (error && error.public_error === true) throw error;
+    const phases = {
+      verify: ["A1", "암호 확인"], recovery: ["A2", "복구 상태 확인"],
+      schema: ["A3", "초기 설정 확인"], sync: ["A4", "학적 연결 확인"],
+      user_session: ["A5", "사용자 세션 발급"], admin_session: ["A6", "관리자 세션 발급"],
+      bootstrap: ["A7", "관리자 화면 조회"],
+    };
+    const selected = Object.prototype.hasOwnProperty.call(phases, phase) ? phases[phase] : ["A0", "로그인 처리"];
+    const names = { TypeError: "T", ReferenceError: "R", RangeError: "N", SyntaxError: "S", Exception: "G" };
+    const errorName = String(error && error.name || "");
+    const kind = Object.prototype.hasOwnProperty.call(names, errorName) ? names[errorName] : "E";
+    const stack = String(error && error.stack || ""), frames = /\bat\s+([A-Za-z_$][\w$]*)\s*\(/g;
+    const allowed = { ensureSheets_: "SI", ensureTableSheet_: "TH", getSpreadsheet_: "WB", getRecordsFresh_: "RR", getRecords_: "RC", withDataRead_: "LK", adminBootstrap_: "AB", teacherBootstrap_: "TB", academicSourceConfig_: "AC", academicLinkStatus_: "AS", normalizeStoredExamPackagingConfig_: "PC", getExamPackagingConfig_: "PG", readLoginRateState_: "LR", writeLoginRateState_: "LW", hashSecret_: "HS" };
+    let location = "X";
+    let frame;
+    while ((frame = frames.exec(stack)) !== null) { if (Object.prototype.hasOwnProperty.call(allowed, frame[1])) { location = allowed[frame[1]]; break; } }
+    const diagnostic = selected[0] + "-" + kind + "-" + location;
+    throw apiError_("ADMIN_ENTRY_FAILED", "관리자 " + selected[1] + " 중 내부 오류가 발생했습니다. 진단번호 " + diagnostic + "를 알려주세요.", { diagnostic: diagnostic });
+  }
 }
 
 function currentUserFromSession_(session) {
