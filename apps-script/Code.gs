@@ -78,23 +78,24 @@ function showDeploymentGuide() {
 }
 
 function doGet() {
-  // 최초 연결은 배포 관리자가 서버에 지정한 학교 원장에만 적용된다.
-  ensureSchemaOnRequest_();
-  if (["pending", "connected"].includes(academicLinkStatus_().state)) syncAcademicData_(false);
-  return jsonOutput_({ ok: true, data: { service: "exam-management", version: APP.VERSION, academic_link_state: academicLinkStatus_().state }, error: null });
+  // A public health check must never migrate sheets, read students, or run synchronization.
+  return jsonOutput_({ ok: true, data: { service: "exam-management", version: APP.VERSION }, error: null });
 }
 
 function doPost(event) {
   let request = {};
   try {
-    request = JSON.parse(event && event.postData ? event.postData.contents : "{}");
-    ensureSchemaOnRequest_();
+    const body = event && event.postData ? event.postData.contents : "{}";
+    if (typeof body !== "string" || body.length > 2000000) throw apiError_("INVALID_REQUEST", "요청 형식이나 크기를 확인하세요.");
+    const parsed = JSON.parse(body);
+    if (!parsed || Array.isArray(parsed) || typeof parsed !== "object" || typeof parsed.action !== "string" || parsed.action.length > 60) throw apiError_("INVALID_REQUEST", "올바른 작업 요청을 보내세요.");
+    request = parsed;
     const data = dispatch_(request);
     return jsonOutput_({ ok: true, data: data, error: null });
   } catch (error) {
     if (!error.auditLogged && request.action !== "presence_ping") {
       try {
-        appendAudit_("unknown", request.action || "unknown", "api", "", 0, false, error.code || "REQUEST_FAILED");
+        auditRejectedRequest_(error.public_error ? error.code : "REQUEST_FAILED");
         error.auditLogged = true;
       } catch (ignored) {}
     }
@@ -102,12 +103,21 @@ function doPost(event) {
       ok: false,
       data: null,
       error: {
-        code: error.code || "REQUEST_FAILED",
-        message: error.message || "요청을 처리하지 못했습니다.",
-        details: error.details || null,
+        code: error.public_error ? error.code : "REQUEST_FAILED",
+        message: error.public_error ? error.message : "요청을 처리하지 못했습니다. 잠시 후 다시 시도하거나 관리자에게 문의하세요.",
+        details: error.public_error ? error.details || null : null,
       },
     });
   }
+}
+
+function auditRejectedRequest_(code) {
+  const lock = LockService.getScriptLock(), alreadyLocked = lock.hasLock();
+  if (!alreadyLocked && !lock.tryLock(50)) return;
+  try {
+    const cache = CacheService.getScriptCache(), key = "rejected-request-audit-minute:" + Math.floor(Date.now() / 60000);
+    if (!cache.get(key)) { cache.put(key, "1", 60); appendAudit_("unknown", "request_rejected", "api", "", 0, false, code); }
+  } finally { if (!alreadyLocked) lock.releaseLock(); }
 }
 
 function ensureSchemaOnRequest_() {
@@ -115,14 +125,15 @@ function ensureSchemaOnRequest_() {
   const marker = "schema-ready:" + APP.SCHEMA_VERSION;
   if (cache.get(marker)) return;
   const lock = LockService.getScriptLock();
-  if (!lock.tryLock(5000)) throw apiError_("BUSY", "초기 데이터 구조를 확인하는 중입니다. 잠시 후 다시 시도하세요.");
+  const alreadyLocked = lock.hasLock();
+  if (!alreadyLocked && !lock.tryLock(5000)) throw apiError_("BUSY", "초기 데이터 구조를 확인하는 중입니다. 잠시 후 다시 시도하세요.");
   try {
     if (!cache.get(marker)) {
       ensureSheets_();
       cache.put(marker, "1", APP.DATA_CACHE_TTL_SECONDS);
     }
   } finally {
-    lock.releaseLock();
+    if (!alreadyLocked) lock.releaseLock();
   }
 }
 
@@ -148,8 +159,9 @@ function dispatch_(request) {
       request.packaging_session,
       action === "save_exam_packaging_items"
     );
-    if (action === "get_exam_packaging") return getExamPackaging_(request, packagingSession);
+    if (action === "get_exam_packaging") return withDataRead_(() => getExamPackaging_(request, packagingSession));
     if (action === "save_exam_packaging_items") {
+      ensureSchemaOnRequest_();
       return withPackagingMutation_(request, packagingSession, () => saveExamPackagingItems_(request, packagingSession));
     }
     throw apiError_("FORBIDDEN", "비밀 편집 링크는 고사 원안 포장 기능에만 사용할 수 있습니다.");
@@ -163,15 +175,18 @@ function dispatch_(request) {
       throw apiError_("FORBIDDEN", "관리자 세션과 사용자 세션이 일치하지 않습니다.");
     }
   }
+  if (action !== "sync_academic_data") ensureSchemaOnRequest_();
+  const needsCurrent = ["get_absence_context", "submit_absence_input", "get_hq_status", "get_period_report", "save_enrollments", "save_seat_chart", "save_seat_charts_batch"].includes(action);
 
   if (["save_class", "delete_class", "replace_students", "import_students", "save_student", "delete_student"].includes(action) && academicSourceConfig_().spreadsheet_id) {
     throw apiError_("ACADEMIC_MANAGED_RECORD", "연결된 학급·학생 명단은 학적 통합에서 수정한 뒤 동기화하세요.");
   }
 
   if (MUTATION_ACTIONS.has(action)) {
-    return withMutation_(request, ADMIN_ACTIONS.has(action) ? "admin" : "user", user.user_id, () => route_(action, request));
+    return withMutation_(request, ADMIN_ACTIONS.has(action) ? "admin" : "user", user.user_id, () => { if (needsCurrent) assertAcademicCurrent_(); return route_(action, request); });
   }
-  return route_(action, request, user);
+  if (["get_bootstrap", "get_admin_bootstrap", "sync_academic_data"].includes(action)) return route_(action, request, user);
+  return withDataRead_(() => { if (needsCurrent) assertAcademicCurrent_(); return route_(action, request, user); });
 }
 
 function route_(action, request, userSession) {
@@ -229,10 +244,12 @@ function userLogin_(request) {
     throw loggedApiError_("user", "user_login", "INVALID_LOGIN", "접속 이름 또는 개인 PIN이 올바르지 않습니다.");
   }
   clearLoginFailures_(rateKeys);
+  ensureSchemaOnRequest_();
+  syncAcademicData_(false);
   const token = createUserSession_(user);
   const currentUser = safeAccessUser_(user);
   safeAppendAudit_("user", "user_login", "session", "", 1, true, "OK", user.id);
-  return { user_session: token, current_user: currentUser, bootstrap: bootstrapForCurrentUser_(teacherBootstrap_(), currentUser) };
+  return { user_session: token, current_user: currentUser, bootstrap: withDataRead_(() => bootstrapForCurrentUser_(teacherBootstrap_(), currentUser)) };
 }
 
 function verifyAdminPassword_(request, action) {
@@ -252,6 +269,9 @@ function verifyAdminPassword_(request, action) {
 
 function adminEntryLogin_(request) {
   verifyAdminPassword_(request, "admin_entry_login");
+  if (PropertiesService.getScriptProperties().getProperty("ACADEMIC_SYNC_JOURNAL")) syncAcademicData_(true, createId_("recovery"), "system_admin");
+  ensureSchemaOnRequest_();
+  syncAcademicData_(false);
   const currentUser = { id: "system_admin", login_name: "관리자", active: true, system: true };
   const userToken = createUserSession_(currentUser, true);
   const adminToken = createAdminSession_(currentUser.id);
@@ -260,7 +280,7 @@ function adminEntryLogin_(request) {
     user_session: userToken,
     admin_session: adminToken,
     current_user: currentUser,
-    bootstrap: bootstrapForCurrentUser_(adminBootstrap_(), currentUser),
+    bootstrap: withDataRead_(() => bootstrapForCurrentUser_(adminBootstrap_(), currentUser)),
   };
 }
 
@@ -285,7 +305,7 @@ function bootstrapForCurrentUser_(bootstrap, currentUser) {
 }
 
 function bootstrapForUser_(admin, session) {
-  return bootstrapForCurrentUser_(admin ? adminBootstrap_() : teacherBootstrap_(), currentUserFromSession_(session));
+  return withDataRead_(() => bootstrapForCurrentUser_(admin ? adminBootstrap_() : teacherBootstrap_(), currentUserFromSession_(session)));
 }
 
 function logout_(request) {
@@ -464,6 +484,10 @@ function submitAbsenceInput_(request) {
       period: Number(request.period),
       class_id: request.class_id,
       student_id: studentId,
+      student_name_snapshot: validStudents.get(studentId).name,
+      student_number_snapshot: validStudents.get(studentId).number,
+      grade_snapshot: (getRecords_(SHEETS.CLASSES).find((row) => String(row.id) === String(request.class_id)) || {}).grade || "",
+      class_num_snapshot: (getRecords_(SHEETS.CLASSES).find((row) => String(row.id) === String(request.class_id)) || {}).class_num || "",
       reason: reason,
       reason_detail: reasonDetail,
       updated_at: now,
@@ -1048,12 +1072,20 @@ function saveTimetable_(request) {
   const now = nowIso_();
   const seen = new Set();
   const subjectSeen = new Set();
+  const linkedSubjects = getRecords_(SHEETS.ENROLLMENTS).filter((row) => row.source_academic_year);
   const rows = request.timetable.map((item) => {
     const examDate = String(item.exam_date || "");
     const grade = Number(item.grade);
     const period = Number(item.period);
-    const subjectName = String(item.subject_name || "").trim().slice(0, 80);
+    let subjectName = String(item.subject_name || "").trim().slice(0, 80);
     const subjectType = item.subject_type === "elective" ? "elective" : "common";
+    if (subjectType === "elective") {
+      const aliases = Array.from(new Set(linkedSubjects.filter((row) => Number(row.grade) === grade && academicNameKey_(row.subject_name) === academicNameKey_(subjectName)).map((row) => String(row.subject_name))));
+      if (aliases.length > 1) throw apiError_("ACADEMIC_SUBJECT_AMBIGUOUS", "학적 수강 과목의 표기를 확인하세요.");
+      if (aliases.length === 1) subjectName = aliases[0];
+    }
+    const startTime = String(item.start_time || "").trim(), endTime = String(item.end_time || "").trim();
+    if ((startTime || endTime) && (!isValidClockTime_(startTime) || !isValidClockTime_(endTime) || startTime >= endTime)) throw apiError_("INVALID_TIMETABLE_TIME", "시작·종료 시각을 입력하고 종료 시각을 시작 시각보다 늦게 설정하세요.");
     if (!/^\d{4}-\d{2}-\d{2}$/.test(examDate) || !Number.isInteger(grade) || !Number.isInteger(period) || period < 1 || !subjectName) {
       throw apiError_("INVALID_TIMETABLE_ROW", "고사일, 학년, 교시, 과목명을 확인하세요.");
     }
@@ -1079,8 +1111,8 @@ function saveTimetable_(request) {
       exam_date: examDate,
       grade: grade,
       period: period,
-      start_time: String(item.start_time || "").slice(0, 10),
-      end_time: String(item.end_time || "").slice(0, 10),
+      start_time: startTime,
+      end_time: endTime,
       subject_name: subjectName,
       subject_type: subjectType,
       room_name: String(item.room_name || "").trim().slice(0, 80),
@@ -2169,6 +2201,7 @@ function withMutation_(request, role, actorId, operation) {
     }
     const cachedAfterLock = readMutationCache_(cache, idempotencyKey, request, role);
     if (cachedAfterLock) return cachedAfterLock;
+    assertAcademicReadable_();
     const result = operation();
     if (request.action === "create_exam_packaging_invite") {
       cache.put(idempotencyKey, JSON.stringify({ __committed: true }), APP.IDEMPOTENCY_TTL_SECONDS);
@@ -2605,6 +2638,7 @@ function apiError_(code, message, details) {
   const error = new Error(message);
   error.code = code;
   error.details = details || null;
+  error.public_error = true;
   return error;
 }
 

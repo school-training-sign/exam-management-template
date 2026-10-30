@@ -26,7 +26,7 @@ function ensureSheets_() {
       ["3", "Apps Script를 웹 앱으로 배포합니다. 실행 사용자는 본인, 접근 권한은 조직 정책이 허용하는 범위로 설정합니다."],
       ["4", "웹 앱 주소를 GitHub Pages 공개 설정의 API_URL에 입력합니다."],
       ["접속", "웹 화면의 관리자 설정으로 들어가 접속 이름과 숫자 4~6자리 개인 PIN을 등록합니다."],
-      ["데이터", "학생 이름은 학생 시트에만 저장되며 감사로그에는 남기지 않습니다."],
+      ["데이터", "학생 이름은 학생·결시 시트에 보관하며 감사로그에는 남기지 않습니다."],
       ["버전", APP.VERSION],
     ]);
     guide.getRange("A1:B1").merge().setBackground("#0d2343").setFontColor("#ffffff").setFontWeight("bold");
@@ -95,7 +95,19 @@ function dataCacheKey_(sheetName) {
   return "records:" + sheetName;
 }
 
+function withDataRead_(operation) {
+  const lock = LockService.getScriptLock();
+  if (lock.hasLock()) { assertAcademicReadable_(); return operation(); }
+  if (!lock.tryLock(5000)) throw apiError_("BUSY", "학적 자료를 반영하는 중입니다. 잠시 후 다시 시도하세요.");
+  try { assertAcademicReadable_(); return operation(); }
+  finally { lock.releaseLock(); }
+}
+
 function getRecords_(sheetName) {
+  return withDataRead_(() => getRecordsUnlocked_(sheetName));
+}
+
+function getRecordsUnlocked_(sheetName) {
   if (CACHEABLE_SHEETS.has(sheetName)) {
     const cache = CacheService.getScriptCache();
     const cached = cache.get(dataCacheKey_(sheetName));
@@ -129,6 +141,10 @@ function getRecordsFresh_(sheetName) {
 }
 
 function replaceRecords_(sheetName, records) {
+  return withDataRead_(() => replaceRecordsUnlocked_(sheetName, records));
+}
+
+function replaceRecordsUnlocked_(sheetName, records) {
   const sheet = getSpreadsheet_().getSheetByName(sheetName);
   if (!sheet) throw new Error("'" + sheetName + "' 시트를 찾지 못했습니다.");
   const canonicalHeaders = HEADERS[sheetName] || [];
@@ -193,6 +209,10 @@ function getPublicSettings_() {
 }
 
 function setSetting_(key, value) {
+  return withDataRead_(() => setSettingUnlocked_(key, value));
+}
+
+function setSettingUnlocked_(key, value) {
   const now = nowIso_();
   const rows = getRecordsFresh_(SHEETS.SETTINGS).filter((item) => String(item.key) !== String(key));
   rows.push({ key: key, value: value, updated_at: now });
@@ -517,8 +537,11 @@ function adminBootstrap_() {
   result.timetable = getRecords_(SHEETS.TIMETABLE).map((item) => Object.assign({}, item, {
     class_ids: normalizeClassIds_(item.class_ids),
   }));
-  const activeStudentIds = new Set(result.students.map((student) => String(student.id)));
-  result.enrollments = getRecords_(SHEETS.ENROLLMENTS).filter((row) => activeStudentIds.has(String(row.student_id)));
+  const activeStudents = new Map(result.students.map((student) => [String(student.id), student]));
+  result.enrollments = getRecords_(SHEETS.ENROLLMENTS).filter((row) => {
+    const student = activeStudents.get(String(row.student_id));
+    return student && String(row.class_id) === String(student.class_id) && (!row.source_academic_year || (Number(row.source_academic_year) === Number(student.source_academic_year) && Number(row.semester) === Number(result.academic_link.target_semester)));
+  });
   result.seat_charts = getRecords_(SHEETS.SEATING).map(deserializeSeat_).reverse();
   return result;
 }
@@ -530,11 +553,11 @@ function decorateAbsences_(rows) {
     const student = students.get(String(item.student_id)) || {};
     const classInfo = classes.get(String(item.class_id)) || {};
     return Object.assign({}, item, {
-      grade: Number(classInfo.grade) || "",
-      class_num: Number(classInfo.class_num) || "",
-      class_label: classInfo.id ? classInfo.grade + "학년 " + classInfo.class_num + "반" : "",
-      student_number: Number(student.number) || "",
-      student_name: student.name || "",
+      grade: Number(item.grade_snapshot || classInfo.grade) || "",
+      class_num: Number(item.class_num_snapshot || classInfo.class_num) || "",
+      class_label: item.grade_snapshot ? item.grade_snapshot + "학년 " + item.class_num_snapshot + "반" : classInfo.id ? classInfo.grade + "학년 " + classInfo.class_num + "반" : "",
+      student_number: Number(item.student_number_snapshot || student.number) || "",
+      student_name: item.student_name_snapshot || student.name || "",
       student_active: isActive_(student),
     });
   });
