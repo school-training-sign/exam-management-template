@@ -124,20 +124,48 @@ function getRecordsUnlocked_(sheetName) {
 }
 
 function getRecordsFresh_(sheetName) {
-  const sheet = getSpreadsheet_().getSheetByName(sheetName);
-  if (!sheet) throw new Error("'" + sheetName + "' 시트를 찾지 못했습니다.");
-  const lastRow = sheet.getLastRow();
-  const lastColumn = Math.max(sheet.getLastColumn(), (HEADERS[sheetName] || []).length);
-  if (lastRow < 2) return [];
-  const values = sheet.getRange(1, 1, lastRow, lastColumn).getValues();
-  const headers = values[0].map((value) => String(value || "").trim());
-  return values.slice(1).filter((row) => row.some((value) => value !== "")).map((row) => {
-    const record = {};
-    headers.forEach((header, index) => {
-      if (header) record[header] = normalizeCell_(row[index]);
+  let step = "S";
+  try {
+    const sheet = getSpreadsheet_().getSheetByName(sheetName);
+    if (!sheet) throw new Error("'" + sheetName + "' 시트를 찾지 못했습니다.");
+    step = "L";
+    const lastRow = sheet.getLastRow();
+    step = "C";
+    // Reading existing data must not presume that a schema migration widened the grid.
+    // In particular, legacy settings may contain only key/value columns.
+    const lastColumn = sheet.getLastColumn();
+    if (lastRow < 2 || lastColumn < 1) return [];
+    step = "V";
+    const values = sheet.getRange(1, 1, lastRow, lastColumn).getValues();
+    step = "N";
+    const headers = values[0].map((value) => String(value || "").trim());
+    return values.slice(1).filter((row) => row.some((value) => value !== "")).map((row) => {
+      const record = {};
+      headers.forEach((header, index) => {
+        if (header) record[header] = normalizeCell_(row[index]);
+      });
+      return record;
     });
-    return record;
-  });
+  } catch (error) {
+    const labels = { [SHEETS.SETTINGS]: "CF", [SHEETS.CLASSES]: "CL", [SHEETS.STUDENTS]: "ST", [SHEETS.EXAM_DATES]: "DT", [SHEETS.TIMETABLE]: "TT", [SHEETS.ENROLLMENTS]: "EN", [SHEETS.ABSENCES]: "AB", [SHEETS.COMPLETIONS]: "CM", [SHEETS.SEATING]: "SE", [SHEETS.AUDIT]: "AU" };
+    const label = Object.prototype.hasOwnProperty.call(labels, sheetName) ? labels[sheetName] : "XX";
+    try { if (error && typeof error === "object" && error.public_error !== true) error.sheet_read_hint = label + "-" + step + "-" + classifySheetReadError_(error); } catch (ignored) {}
+    throw error;
+  }
+}
+
+function classifySheetReadError_(error) {
+  // Inspect locally; expose only a fixed category, never Google's exception text/IDs.
+  const text = String(error && error.message || "");
+  if (/authoriz|인증|승인.*필요/i.test(text)) return "AUTH";
+  if (/permission|access denied|not have access|권한|액세스.*거부/i.test(text)) return "PERM";
+  if (/out of bounds|exceed.*grid|outside.*(grid|range)|number of (columns|rows).*at least|범위.*벗어|열 수|행 수/i.test(text)) return "BOUND";
+  if (/quota|too many|limit exceeded|maximum execution|할당량|너무 많은|호출.*한도/i.test(text)) return "QUOTA";
+  if (/invalid.*date|invalid time value|formatDate|날짜.*잘못/i.test(text)) return "DATE";
+  if (/range not found|invalid.*range|starting (row|column)|범위.*찾|잘못된.*범위/i.test(text)) return "RANGE";
+  if (/parameters.*(match|signature)|invalid argument|인수.*잘못|매개변수/i.test(text)) return "TYPE";
+  if (/service.*(spreadsheets|error)|timed? ?out|internal error|server.*(error|unavailable)|시간.*초과|서버.*오류|서비스.*오류/i.test(text)) return "SERVICE";
+  return "OTHER";
 }
 
 function replaceRecords_(sheetName, records) {

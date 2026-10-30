@@ -314,7 +314,9 @@ function runAdminLoginPhase_(phase, operation) {
     let location = "X";
     let frame;
     while ((frame = frames.exec(stack)) !== null) { if (Object.prototype.hasOwnProperty.call(allowed, frame[1])) { location = allowed[frame[1]]; break; } }
-    const diagnostic = selected[0] + "-" + kind + "-" + location;
+    const readHint = String(error && error.sheet_read_hint || "");
+    const safeReadHint = /^(CF|CL|ST|DT|TT|EN|AB|CM|SE|AU|XX)-[SLCVN]-(AUTH|PERM|BOUND|QUOTA|DATE|RANGE|TYPE|SERVICE|OTHER)$/.test(readHint) ? readHint : "";
+    const diagnostic = selected[0] + "-" + kind + "-" + location + (safeReadHint ? "-" + safeReadHint : "");
     throw apiError_("ADMIN_ENTRY_FAILED", "관리자 " + selected[1] + " 중 내부 오류가 발생했습니다. 진단번호 " + diagnostic + "를 알려주세요.", { diagnostic: diagnostic });
   }
 }
