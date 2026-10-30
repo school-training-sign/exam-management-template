@@ -15,7 +15,7 @@ function harness(){
   setFrozenRows(){},
   getLastColumn:()=>tables.get(name)?.[0]?.length||0,
   getLastRow:()=>{let rows=tables.get(name)||[];let end=rows.length;while(end&&rows[end-1].every(x=>x===''))end--;return end;},
-  getDataRange:()=>({getValues:()=>clone(tables.get(name)||[])}),
+  getDataRange:()=>({getValues(){const values=clone(tables.get(name)||[]);state.hooks.afterRead?.(name);return values;}}),
   getRange(row,column,height,width){return {
    setBackground(){return this;},setFontColor(){return this;},setFontWeight(){return this;},
    getValues(){const values=Array.from({length:height},(_,y)=>Array.from({length:width},(_,x)=>tables.get(name)?.[row-1+y]?.[column-1+x]??''));state.hooks.afterRead?.(name);return values;},
@@ -66,7 +66,7 @@ test('동기화 중 별도 실행의 명단 조회는 혼합 스냅샷 대신 BU
 });
 test('캐시 채우기 중 writer는 잠금을 얻지 못해 오래된 캐시 재삽입 경합이 없다',()=>{
  const h=harness();let checked=false;h.state.hooks.afterRead=name=>{if(name!==h.S.STUDENTS||checked)return;checked=true;assert.throws(()=>h.reader.syncAcademicData_(true,'other','synthetic-admin'),{code:'BUSY'});};
- assert.equal(h.writer.getRecords_(h.S.STUDENTS)[0].number,1);h.state.hooks={};h.sync('later');assert.equal(h.writer.getRecords_(h.S.STUDENTS)[0].number,9);
+ assert.equal(h.writer.getRecords_(h.S.STUDENTS)[0].number,1);assert.equal(checked,true,'read hook must exercise the competing writer');h.state.hooks={};h.sync('later');assert.equal(h.writer.getRecords_(h.S.STUDENTS)[0].number,9);
 });
 test('쓰기·첫 원복 이중 실패에도 나머지 표를 원복하고 영속 복구 표식으로 차단한다',()=>{
  const h=harness();let phase=0;h.state.hooks.beforeSet=name=>{if(phase===0&&name===h.S.ENROLLMENTS){phase=1;throw Error('FORWARD_IO');}if(phase===1&&name===h.S.CLASSES){phase=2;throw Error('RESTORE_IO');}};

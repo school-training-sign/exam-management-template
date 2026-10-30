@@ -128,15 +128,11 @@ function getRecordsFresh_(sheetName) {
   try {
     const sheet = getSpreadsheet_().getSheetByName(sheetName);
     if (!sheet) throw new Error("'" + sheetName + "' 시트를 찾지 못했습니다.");
-    step = "L";
-    const lastRow = sheet.getLastRow();
-    step = "C";
-    // Reading existing data must not presume that a schema migration widened the grid.
-    // In particular, legacy settings may contain only key/value columns.
-    const lastColumn = sheet.getLastColumn();
-    if (lastRow < 2 || lastColumn < 1) return [];
     step = "V";
-    const values = sheet.getRange(1, 1, lastRow, lastColumn).getValues();
+    // Read existing cells directly, without separate row/column metadata calls.
+    // Legacy two-column settings and any extra existing columns remain intact.
+    const values = sheet.getDataRange().getValues();
+    if (values.length < 2 || !values[0].length) return [];
     step = "N";
     const headers = values[0].map((value) => String(value || "").trim());
     return values.slice(1).filter((row) => row.some((value) => value !== "")).map((row) => {
