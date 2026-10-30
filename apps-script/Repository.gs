@@ -17,7 +17,9 @@ function ensureSheets_() {
   const guideText = guide.getLastRow() ? guide.getDataRange().getDisplayValues().flat().join(" ") : "";
   if (!guideText.includes(APP.SYSTEM_NAME) || !guideText.includes(APP.VERSION) || guideText.includes(["학교", "코드"].join("")) || guideText.includes("PIN 6자리")) {
     const oldGuideRange = guide.getDataRange();
-    oldGuideRange.breakApart();
+    // A merged cell's empty tail can extend beyond getDataRange() (e.g. A:F
+    // while only A:B contain values). Unmerge each complete overlapping range.
+    oldGuideRange.getMergedRanges().forEach((range) => range.breakApart());
     oldGuideRange.clearContent();
     guide.getRange("A1:B8").setValues([
       [APP.SYSTEM_NAME, "학교 운영 시트"],

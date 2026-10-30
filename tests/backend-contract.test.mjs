@@ -647,7 +647,8 @@ test("초기 설정과 스키마 마이그레이션이 새 시스템 이름과 �
   assert.match(initBlock, /passwordPrompt/);
   assert.doesNotMatch(initBlock, /schoolCodePrompt|request\.school_code/);
   assert.match(initBlock, /setSetting_\("app_name", APP\.SYSTEM_NAME\)/);
-  assert.match(source["Repository.gs"], /oldGuideRange\.breakApart\(\)[\s\S]*oldGuideRange\.clearContent\(\)/);
+  assert.match(source["Repository.gs"], /oldGuideRange\.getMergedRanges\(\)\.forEach\(\(range\) => range\.breakApart\(\)\)[\s\S]*oldGuideRange\.clearContent\(\)/);
+  assert.doesNotMatch(source["Repository.gs"], /oldGuideRange\.breakApart\(\)/);
   assert.match(source["Repository.gs"], /PROPERTY_ACCESS_USER_PEPPER/);
   assert.match(source["Repository.gs"], /\["SCHOOL", "CODE", "SALT"\]\.join\("_"\)/);
 });
